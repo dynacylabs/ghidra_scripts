@@ -2,7 +2,7 @@
 #@author 
 #@category
 #@keybinding ALT-SHIFT-G
-#@menupath 
+#@menupath Search.Google Search
 #@toolbar 
 
 DEFAULT_BROWSER='firefox'

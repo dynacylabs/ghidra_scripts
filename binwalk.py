@@ -2,7 +2,7 @@
 #@author Thomas Roth code@stacksmashing.net
 #@category Ghidra Ninja
 #@keybinding 
-#@menupath 
+#@menupath Tools.Analysis.Binwalk
 #@toolbar 
 
 
