@@ -1,0 +1,9 @@
+[submodule "ghidra-gdt"]
+	path = ghidra-gdt
+	url = https://github.com/dynacylabs/ghidra-gdt.git
+[submodule "ghidra-rizzo"]
+	path = ghidra-rizzo
+	url = https://github.com/dynacylabs/ghidra-rizzo.git
+[submodule "ghidra-svd-loader"]
+	path = ghidra-svd-loader
+	url = https://github.com/dynacylabs/ghidra-svd-loader.git
