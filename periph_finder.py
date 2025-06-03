@@ -2,6 +2,8 @@
 from enum import Enum
 from typing import Optional, Tuple
 
+from ghidra.program.model.address import AddressSet
+
 
 class AccessType(Enum):
     """
@@ -24,6 +26,7 @@ class AccessType(Enum):
 
         __repr__(self)
             Returns the string representation (name) of the AccessType member.
+    """
     R = 1
     W = 2
     X = 4
@@ -31,7 +34,6 @@ class AccessType(Enum):
     RX = R | X
     WX = W | X
     RWX = R | W | X
-    """
 
     def __add__(self, other) -> Optional["AccessType"]:
         """
@@ -504,40 +506,64 @@ def create_mem_regs(regs: list = []) -> None:
     )
 
     if create:
-        space = getCurrentProgram().getAddressFactory().getDefaultAddressSpace()
+        curr_mem = getCurrentProgram().getMemory()
+        addr_factory = getCurrentProgram().getAddressFactory()
 
         for i, reg in enumerate(regs):
             reg = reg[1]
-            mem = getCurrentProgram().memory.createUninitializedBlock(
-                f"PERIPH?{i}", space.getAddress(reg.start_int), reg.len_int, False
+
+            blk_name = f"PERIPH{i}"
+
+            reg_set = AddressSet(
+                addr_factory.getAddress(reg.start_hex),
+                addr_factory.getAddress(reg.end_hex)
             )
 
-            # Set read permission if applicable
-            if reg.access in [
-                AccessType.R,
-                AccessType.RW,
-                AccessType.RX,
-                AccessType.RWX,
-            ]:
-                mem.setRead(True)
+            for old_bk in curr_mem.getBlocks():
+                old_blk_set = AddressSet(old_bk.getStart(), old_bk.getEnd())
+                reg_set = reg_set.subtract(old_blk_set)
+            
+            j = 0
 
-            # Set write permission if applicable
-            if reg.access in [
-                AccessType.W,
-                AccessType.RW,
-                AccessType.WX,
-                AccessType.RWX,
-            ]:
-                mem.setWrite(True)
+            addr_ranges = reg_set.getAddressRanges()
+            for addr_range in addr_ranges:
+                new_blk_name = blk_name if j == 0 else f"{blk_name}.{j}"
+                
+                mem = getCurrentProgram().getMemory().createUninitializedBlock(
+                    new_blk_name,
+                    addr_range.getMinAddress(),
+                    addr_range.getLength(),
+                    False
+                )
 
-            # Set volatile (execute) permission if applicable
-            if reg.access in [
-                AccessType.X,
-                AccessType.RX,
-                AccessType.WX,
-                AccessType.RWX,
-            ]:
-                mem.setVolatile(True)
+                # Set read permission if applicable
+                if reg.access in [
+                    AccessType.R,
+                    AccessType.RW,
+                    AccessType.RX,
+                    AccessType.RWX,
+                ]:
+                    mem.setRead(True)
+
+                # Set write permission if applicable
+                if reg.access in [
+                    AccessType.W,
+                    AccessType.RW,
+                    AccessType.WX,
+                    AccessType.RWX,
+                ]:
+                    mem.setWrite(True)
+
+                # Set volatile (execute) permission if applicable
+                if reg.access in [
+                    AccessType.X,
+                    AccessType.RX,
+                    AccessType.WX,
+                    AccessType.RWX,
+                ]:
+                    mem.setVolatile(True)
+
+                j = j + 1
 
 
 if __name__ == "__main__":
