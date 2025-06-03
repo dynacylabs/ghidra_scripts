@@ -491,44 +491,56 @@ def print_regs(regs: list = []) -> None:
 
 def create_mem_regs(regs: list = []) -> None:
     """
-    Optionally creates uninitialized memory blocks in Ghidra for each memory region.
-
-    Prompts the user to confirm creation. For each region, creates an uninitialized memory block
-    with the appropriate access permissions (read, write, volatile/execute) based on the region's
-    access type.
-
+    Creates memory regions in Ghidra based on a provided list of register regions.
+    This function prompts the user to confirm whether to create new memory regions. If confirmed,
+    it iterates over the provided list of register regions, subtracts any overlapping existing
+    memory blocks, and creates new uninitialized memory blocks for each non-overlapping region.
+    Memory block permissions (read, write, volatile/execute) are set according to the access type
+    specified in each region.
     Args:
-        regs (list, optional): List of tuples (start_hex, MemRegion) to create as memory blocks.
+        regs (list, optional): A list of register region tuples, where each tuple contains
+            information about the region, including start and end addresses (as hex strings)
+            and access type. Defaults to an empty list.
+    Returns:
+        None
     """
     create = askYesNo(
-        "Create memory regions?",
-        "Review the console for memory regions to be completed.",
-    )
+            "Create memory regions?",
+            "Review the console for memory regions to be completed.",
+        )
 
     if create:
+        # Get the current program's memory and address factory
         curr_mem = getCurrentProgram().getMemory()
         addr_factory = getCurrentProgram().getAddressFactory()
 
+        # Iterate over each memory region to be created
         for i, reg in enumerate(regs):
             reg = reg[1]
 
+            # Name the memory block (e.g., PERIPH0, PERIPH1, ...)
             blk_name = f"PERIPH{i}"
 
+            # Create an AddressSet for the region's start and end addresses
             reg_set = AddressSet(
                 addr_factory.getAddress(reg.start_hex),
                 addr_factory.getAddress(reg.end_hex)
             )
 
+            # Subtract any existing memory blocks from the region to avoid overlaps
             for old_bk in curr_mem.getBlocks():
                 old_blk_set = AddressSet(old_bk.getStart(), old_bk.getEnd())
                 reg_set = reg_set.subtract(old_blk_set)
             
             j = 0
 
+            # For each non-overlapping address range, create a new uninitialized memory block
             addr_ranges = reg_set.getAddressRanges()
             for addr_range in addr_ranges:
+                # Name additional blocks with a suffix if needed
                 new_blk_name = blk_name if j == 0 else f"{blk_name}.{j}"
                 
+                # Actually create the uninitialized memory block in Ghidra
                 mem = getCurrentProgram().getMemory().createUninitializedBlock(
                     new_blk_name,
                     addr_range.getMinAddress(),
