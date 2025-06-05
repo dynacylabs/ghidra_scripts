@@ -8,14 +8,21 @@ from ghidra.program.model.listing import CodeUnit
 from ghidra.program.model.symbol import SourceType
 
 
+# Get the current Ghidra program object
 prog = getCurrentProgram()
 
+# Obtain the address factory for creating/manipulating addresses
 addr_factory = prog.getAddressFactory()
+# Get the listing object for iterating over instructions/data
 listing = prog.getListing()
+# Access the memory object for memory block operations
 mem = prog.getMemory()
+# Reference manager for handling code/data references
 ref_man = prog.getReferenceManager()
+# Symbol table for managing symbols and labels
 symbol_table = prog.getSymbolTable()
 
+# Define a pointer data type for later use in data creation
 ptr_data_type = PointerDataType()
 
 
@@ -353,11 +360,15 @@ def get_inv_refs() -> list:
 
         for ref in refs:
             dst = ref.getToAddress()
+            # Only consider references that point outside the current memory and are not stack addresses
             if not mem.contains(dst) and not dst.isStackAddress():
+                # Wrap the reference in an InvMemRef object
                 ref = InvMemRef(ref)
+                # If we've already seen this destination, combine access types
                 if ref.dst_hex in _refs.keys():
                     _refs[ref.dst_hex].access = _refs[ref.dst_hex].access + ref.access
                 else:
+                    # Otherwise, add this reference to the dictionary
                     _refs[ref.dst_hex] = ref
 
     return _refs
@@ -385,28 +396,31 @@ def gen_regs(inv_refs: list = [], ref_prox: int = 0) -> list:
         # Check if the reference falls within any existing region
         for reg in regs:
             if not in_region:
+                # If the reference address is inside an existing region, combine access and mark as handled
                 if reg.start_int <= ref.dst_int and ref.dst_int <= reg.end_int:
                     reg.access = reg.access + ref.access
                     in_region = True
                     break
 
-        # Check if the reference is close enough to extend an existing region
+        # If not inside, check if it's close enough to extend an existing region
         if not in_region:
             for reg in regs:
                 if ref.dst_int < reg.start_int:
+                    # If the reference is just before the region and within proximity, extend region start
                     if reg.start_int - ref.dst_int <= ref_prox:
                         reg.start_int = ref.dst_int
                         reg.access = reg.access + ref.access
                         in_region = True
                         break
                 elif ref.dst_int > reg.end_int:
+                    # If the reference is just after the region and within proximity, extend region end
                     if ref.dst_int - reg.end_int <= ref_prox:
                         reg.end_int = ref.dst_int
                         reg.access = reg.access + ref.access
                         in_region = True
                         break
 
-        # If not in any region, create a new region for this reference
+        # If not in or near any region, create a new region for this reference
         if not in_region:
             regs.append(
                 MemRegion(start=ref.dst_int, end=ref.dst_int + 1, access=ref.access)
@@ -427,9 +441,13 @@ def sort_regs(regs: list = []) -> list:
     """
     _regs = []
     for reg in regs:
+        # Pair each region with its start address (hex) for sorting
         _regs.append((reg.start_hex, reg))
+
+    # Sort the list of tuples by the start address (hexadecimal string)
     regs = sorted(_regs, key=lambda x: x[0])
 
+    # Return the sorted list of (start_hex, MemRegion) tuples
     return regs
 
 
@@ -449,11 +467,15 @@ def combine_regs(regs: list = [], reg_prox: int = 0) -> list:
         list: List of tuples (start_hex, MemRegion), with combined regions where applicable.
     """
     if len(regs) <= 1:
+        # If there is only one or zero regions, nothing to combine; return as is
         return regs
 
+    # Get the first MemRegion object from the tuple
     curr_reg = regs[0][1]
+    # Get the second MemRegion object from the tuple
     next_reg = regs[1][1]
 
+    # Check if the next region is close enough to the current region to be merged
     if next_reg.start_int - curr_reg.end_int <= reg_prox:
         # Merge the two regions and combine their access permissions
         combined_reg = MemRegion(
@@ -461,10 +483,11 @@ def combine_regs(regs: list = [], reg_prox: int = 0) -> list:
             end=next_reg.end_int,
             access=(next_reg.access + curr_reg.access),
         )
+        # Recursively combine the rest of the regions, prepending the merged region
         new_regs = [(regs[0][0], combined_reg)] + combine_regs(regs[2:], reg_prox)
         return new_regs
     else:
-        # Keep the current region and continue combining the rest
+        # If not close enough, keep the current region and continue combining the rest
         return [regs[0]] + combine_regs(regs[1:], reg_prox)
 
 
@@ -480,8 +503,11 @@ def align_regs(regs: list = [], align: int = 0) -> None:
         align (int, optional): Alignment value to use for rounding addresses.
     """
     for reg in regs:
+        # Extract the MemRegion object from the (start_hex, MemRegion) tuple
         reg = reg[1]
+        # Align the start address down to the nearest alignment boundary
         reg.start_int = reg.start_int // align * align
+        # Align the end address up to the next alignment boundary
         reg.end_int = ((reg.end_int + align) // align) * align
 
 
@@ -495,9 +521,12 @@ def print_regs(regs: list = []) -> None:
     Args:
         regs (list, optional): List of tuples (start_hex, MemRegion) to print.
     """
+    # Print table header for memory region summary
     print(f"Start, End, Length, Access")
     for reg in regs:
+        # Extract the MemRegion object from the (start_hex, MemRegion) tuple
         reg = reg[1]
+        # Print the region's start address, end address, length, and access permissions in CSV format
         print(f"{reg.start_hex}, {reg.end_hex}, {reg.len_hex}, {reg.access}")
 
 
@@ -591,27 +620,61 @@ def create_mem_regs(regs: list = []) -> None:
 
 
 def create_periph_labels():
+    """
+    Creates user-defined labels for referenced addresses within uninitialized memory blocks (typically peripheral regions) in the current Ghidra program.
+    Prompts the user for confirmation before proceeding. For each uninitialized memory block, iterates through all addresses and creates a label in the format "<block_name>_0x<offset>" at each address that has references to it. The labels are added as user-defined symbols in the program's symbol table.
+    Dependencies:
+        - mem: The memory object of the current program.
+        - ref_man: The reference manager of the current program.
+        - askYesNo: Function to prompt the user for confirmation.
+        - getCurrentProgram, SourceType: Ghidra scripting API components.
+    Prints a message for each label created.
+    """
     create = askYesNo(
         "Create peripheral labels?",
         "Create labels in the format 'PERIPH{index}_{offset}'",
     )
 
     if create:
+        # Iterate over all memory blocks in the program
         for blk in mem.getBlocks():
+            # Only process uninitialized memory blocks (likely peripheral regions)
             if not blk.isInitialized():
                 addr = blk.getStart()
+                # Walk through every address in the block
                 while addr <= blk.getEnd():
+                    # If there are references to this address, create a label
                     if ref_man.getReferencesTo(addr):
                         offset = addr.subtract(blk.getStart())
+                        # Format the label as "<block_name>_0x<offset>"
                         lbl = "{}_0x{:X}".format(blk.getName(), offset)
+                        # Create the label at this address as a user-defined symbol
                         getCurrentProgram().getSymbolTable().createLabel(
                             addr, lbl, SourceType.USER_DEFINED
                         )
                         print(f"Labeling {addr} as {lbl}")
-                        addr = addr.add(1)
+                    # Move to the next address in the block
+                    addr = addr.add(1)
 
 
 def update_ptr_labels():
+    """
+    Scans the program for undefined data items that may represent pointers to uninitialized memory blocks (likely peripheral regions),
+    sets their data type to pointer, and creates descriptive labels for them.
+    Prompts the user for confirmation before proceeding. For each undefined data item, attempts to interpret its value as a pointer.
+    If the pointer falls within any uninitialized memory block and the destination has a symbol, updates the data type to pointer and
+    creates a label in the format 'PTR_<destination_symbol_name>' at the pointer's address.
+    Assumes the existence of the following global variables or functions:
+    - mem: the program's memory object
+    - prog: the current program object
+    - symbol_table: the program's symbol table
+    - ptr_data_type: the pointer data type to assign
+    - askYesNo: function to prompt the user
+    - toAddr: function to convert an integer to an address
+    - DataUtilities: utility class for data creation and manipulation
+    - Undefined: the undefined data type class
+    - SourceType: enumeration for label source types
+    """
     create = askYesNo(
         "Update pointer labels?",
         "Find, label, and set the datatype to pointer for possible pointers in the format 'PTR_PERIPH{index}_{offset}'",
@@ -619,17 +682,24 @@ def update_ptr_labels():
 
     if create:
         regs = {}
+        # Build a dictionary of all uninitialized memory blocks (likely peripheral regions)
         for blk in mem.getBlocks():
             if not blk.isInitialized():
                 regs[blk.getName()] = (blk.getStart(), blk.getEnd())
 
+        # Iterate over all defined data items in the program
         for data in prog.getListing().getDefinedData(True):
             addr = data.getAddress()
+            # Check if the data type is undefined (potential pointer)
             if isinstance(data.getDataType(), Undefined):
+                # Try to interpret the value at this address as a pointer
                 potential_addr = toAddr(mem.getInt(data.getAddress()))
+                # Check if the pointer falls within any peripheral region
                 for reg_name, (start_addr, end_addr) in regs.items():
                     if start_addr <= potential_addr <= end_addr:
+                        # If the destination has a symbol, create a pointer and label
                         if symbol_table.getPrimarySymbol(potential_addr):
+                            # Set the data type at this address to pointer
                             DataUtilities.createData(
                                 prog,
                                 addr,
@@ -638,6 +708,7 @@ def update_ptr_labels():
                                 False,
                                 DataUtilities.ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA,
                             )
+                            # Create a label for the pointer referencing the peripheral
                             lbl_name = f"PTR_{symbol_table.getPrimarySymbol(potential_addr).getName()}"
                             symbol_table.createLabel(
                                 addr,
