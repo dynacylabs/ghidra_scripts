@@ -3,6 +3,20 @@ from enum import Enum
 from typing import Optional, Tuple
 
 from ghidra.program.model.address import AddressSet
+from ghidra.program.model.data import DataUtilities, Undefined, PointerDataType
+from ghidra.program.model.listing import CodeUnit
+from ghidra.program.model.symbol import SourceType
+
+
+prog = getCurrentProgram()
+
+addr_factory = prog.getAddressFactory()
+listing = prog.getListing()
+mem = prog.getMemory()
+ref_man = prog.getReferenceManager()
+symbol_table = prog.getSymbolTable()
+
+ptr_data_type = PointerDataType()
 
 
 class AccessType(Enum):
@@ -27,6 +41,7 @@ class AccessType(Enum):
         __repr__(self)
             Returns the string representation (name) of the AccessType member.
     """
+
     R = 1
     W = 2
     X = 4
@@ -329,7 +344,7 @@ def get_inv_refs() -> list:
     Returns:
         dict: A dictionary mapping destination hex addresses to InvMemRef objects.
     """
-    instr_iter = getCurrentProgram().getListing().getInstructions(True)
+    instr_iter = listing.getInstructions(True)
 
     _refs = {}
     while instr_iter.hasNext():
@@ -338,10 +353,7 @@ def get_inv_refs() -> list:
 
         for ref in refs:
             dst = ref.getToAddress()
-            if (
-                not getCurrentProgram().getMemory().contains(dst)
-                and not dst.isStackAddress()
-            ):
+            if not mem.contains(dst) and not dst.isStackAddress():
                 ref = InvMemRef(ref)
                 if ref.dst_hex in _refs.keys():
                     _refs[ref.dst_hex].access = _refs[ref.dst_hex].access + ref.access
@@ -505,15 +517,11 @@ def create_mem_regs(regs: list = []) -> None:
         None
     """
     create = askYesNo(
-            "Create memory regions?",
-            "Review the console for memory regions to be completed.",
-        )
+        "Create memory regions?",
+        "Review the console for memory regions to be completed.",
+    )
 
     if create:
-        # Get the current program's memory and address factory
-        curr_mem = getCurrentProgram().getMemory()
-        addr_factory = getCurrentProgram().getAddressFactory()
-
         # Iterate over each memory region to be created
         for i, reg in enumerate(regs):
             reg = reg[1]
@@ -524,14 +532,14 @@ def create_mem_regs(regs: list = []) -> None:
             # Create an AddressSet for the region's start and end addresses
             reg_set = AddressSet(
                 addr_factory.getAddress(reg.start_hex),
-                addr_factory.getAddress(reg.end_hex)
+                addr_factory.getAddress(reg.end_hex),
             )
 
             # Subtract any existing memory blocks from the region to avoid overlaps
-            for old_bk in curr_mem.getBlocks():
+            for old_bk in mem.getBlocks():
                 old_blk_set = AddressSet(old_bk.getStart(), old_bk.getEnd())
                 reg_set = reg_set.subtract(old_blk_set)
-            
+
             j = 0
 
             # For each non-overlapping address range, create a new uninitialized memory block
@@ -539,13 +547,17 @@ def create_mem_regs(regs: list = []) -> None:
             for addr_range in addr_ranges:
                 # Name additional blocks with a suffix if needed
                 new_blk_name = blk_name if j == 0 else f"{blk_name}.{j}"
-                
+
                 # Actually create the uninitialized memory block in Ghidra
-                mem = getCurrentProgram().getMemory().createUninitializedBlock(
-                    new_blk_name,
-                    addr_range.getMinAddress(),
-                    addr_range.getLength(),
-                    False
+                _mem = (
+                    getCurrentProgram()
+                    .getMemory()
+                    .createUninitializedBlock(
+                        new_blk_name,
+                        addr_range.getMinAddress(),
+                        addr_range.getLength(),
+                        False,
+                    )
                 )
 
                 # Set read permission if applicable
@@ -555,7 +567,7 @@ def create_mem_regs(regs: list = []) -> None:
                     AccessType.RX,
                     AccessType.RWX,
                 ]:
-                    mem.setRead(True)
+                    _mem.setRead(True)
 
                 # Set write permission if applicable
                 if reg.access in [
@@ -564,7 +576,7 @@ def create_mem_regs(regs: list = []) -> None:
                     AccessType.WX,
                     AccessType.RWX,
                 ]:
-                    mem.setWrite(True)
+                    _mem.setWrite(True)
 
                 # Set volatile (execute) permission if applicable
                 if reg.access in [
@@ -573,33 +585,95 @@ def create_mem_regs(regs: list = []) -> None:
                     AccessType.WX,
                     AccessType.RWX,
                 ]:
-                    mem.setVolatile(True)
+                    _mem.setVolatile(True)
 
                 j = j + 1
 
 
+def create_periph_labels():
+    create = askYesNo(
+        "Create peripheral labels?",
+        "Create labels in the format 'PERIPH{index}_{offset}'",
+    )
+
+    if create:
+        for blk in mem.getBlocks():
+            if not blk.isInitialized():
+                addr = blk.getStart()
+                while addr <= blk.getEnd():
+                    if ref_man.getReferencesTo(addr):
+                        offset = addr.subtract(blk.getStart())
+                        lbl = "{}_0x{:X}".format(blk.getName(), offset)
+                        getCurrentProgram().getSymbolTable().createLabel(
+                            addr, lbl, SourceType.USER_DEFINED
+                        )
+                        print(f"Labeling {addr} as {lbl}")
+                        addr = addr.add(1)
+
+
+def update_ptr_labels():
+    create = askYesNo(
+        "Update pointer labels?",
+        "Find, label, and set the datatype to pointer for possible pointers in the format 'PTR_PERIPH{index}_{offset}'",
+    )
+
+    if create:
+        regs = {}
+        for blk in mem.getBlocks():
+            if not blk.isInitialized():
+                regs[blk.getName()] = (blk.getStart(), blk.getEnd())
+
+        for data in prog.getListing().getDefinedData(True):
+            addr = data.getAddress()
+            if isinstance(data.getDataType(), Undefined):
+                potential_addr = toAddr(mem.getInt(data.getAddress()))
+                for reg_name, (start_addr, end_addr) in regs.items():
+                    if start_addr <= potential_addr <= end_addr:
+                        if symbol_table.getPrimarySymbol(potential_addr):
+                            DataUtilities.createData(
+                                prog,
+                                addr,
+                                ptr_data_type,
+                                -1,
+                                False,
+                                DataUtilities.ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA,
+                            )
+                            lbl_name = f"PTR_{symbol_table.getPrimarySymbol(potential_addr).getName()}"
+                            symbol_table.createLabel(
+                                addr,
+                                lbl_name,
+                                SourceType.USER_DEFINED,
+                            )
+                            print(f"Labeling {addr} as {lbl_name}")
+
+
 if __name__ == "__main__":
-    if __name__ == "__main__":
-        # Collect all inverse memory references from the current Ghidra program
-        inv_refs = get_inv_refs()
+    # Collect all inverse memory references from the current Ghidra program
+    inv_refs = get_inv_refs()
 
-        # Prompt the user for proximity and alignment parameters
-        ref_prox, reg_prox, align = get_params()
+    # Prompt the user for proximity and alignment parameters
+    ref_prox, reg_prox, align = get_params()
 
-        # Generate memory regions from the collected references and user parameters
-        regs = gen_regs(inv_refs=inv_refs, ref_prox=ref_prox)
+    # Generate memory regions from the collected references and user parameters
+    regs = gen_regs(inv_refs=inv_refs, ref_prox=ref_prox)
 
-        # Sort the memory regions by their start address
-        regs = sort_regs(regs=regs)
+    # Sort the memory regions by their start address
+    regs = sort_regs(regs=regs)
 
-        # Combine adjacent or nearby regions based on region proximity
-        regs = combine_regs(regs=regs, reg_prox=reg_prox)
+    # Combine adjacent or nearby regions based on region proximity
+    regs = combine_regs(regs=regs, reg_prox=reg_prox)
 
-        # Align the start and end addresses of each region to the specified alignment
-        align_regs(regs=regs, align=align)
+    # Align the start and end addresses of each region to the specified alignment
+    align_regs(regs=regs, align=align)
 
-        # Print a summary table of the memory regions
-        print_regs(regs=regs)
+    # Print a summary table of the memory regions
+    print_regs(regs=regs)
 
-        # Optionally create uninitialized memory blocks in Ghidra for each region
-        create_mem_regs(regs=regs)
+    # Optionally create uninitialized memory blocks in Ghidra for each region
+    create_mem_regs(regs=regs)
+
+    # Optionally create labels for peripheral addresses (helps readability)
+    create_periph_labels()
+
+    # Optionally update pointer labels (helps readability)
+    update_ptr_labels()
