@@ -21,7 +21,6 @@ mem = prog.getMemory()
 ref_man = prog.getReferenceManager()
 # Symbol table for managing symbols and labels
 symbol_table = prog.getSymbolTable()
-
 # Define a pointer data type for later use in data creation
 ptr_data_type = PointerDataType()
 
