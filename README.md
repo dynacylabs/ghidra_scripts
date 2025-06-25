@@ -15,8 +15,6 @@ $GHIDRA_HOME/support/pyghidrarun
 ```
 
 # `ai_auto_comment.py`
-## Resources
-[**NG-Cloud-for-AI**](https://github.northgrum.com/NG-Cloud-for-AI/AI-Integrations)
 
 ## Install
 This step will install some `python` dependencies `ai_auto_comment.py` needs to run.
