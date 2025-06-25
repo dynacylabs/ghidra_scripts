@@ -25,15 +25,6 @@ pip install -r ai_auto_comment_requirements.txt
 deactivate
 ```
 
-## Issues
-### PLN DNS
-**Issue:** `aiml-aoai-api.gc1.myngc.com` becomes unresolvable shortly after reboot.
-
-**Solution:** Add an entry to `/etc/hosts`:
-```
-10.14.228.68	aiml-aoai-api.gc1.myngc.com  # This is more of a hack than a fix
-```
-
 ## Limitations
 1. This likely will fail on large functions. This could be due to several reasons:
   - Token limit on the AI
