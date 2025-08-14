@@ -13,31 +13,3 @@ This step will install `PyGhidra` and will launch Ghidra in `PyGhidra` mode. Thi
 ```sh
 $GHIDRA_HOME/support/pyghidrarun
 ```
-
-# `ai_auto_comment.py`
-
-## Install
-This step will install some `python` dependencies `ai_auto_comment.py` needs to run.
-
-```sh
-source $HOME/.config/ghidra/$GHIDRA_VERSION/venv/bin/activate
-pip install -r ai_auto_comment_requirements.txt
-deactivate
-```
-
-## Limitations
-1. This likely will fail on large functions. This could be due to several reasons:
-  - Token limit on the AI
-  - Decompiled function is too complex
-  - Decompilation of the function takes longer than 30 seconds
-
-## Observations
-The script iterates over functions from smallest to largest, based on function size. Starting out, functions will not get very descriptive names due to:
-- Functions being small
-- Lack of descriptive function names
-
-As the script proceeds, the function names will begin to be more descriptive as the decompilation will have more of the renamed functions in it. This will aid the AI in determining the functionality.
-
-Further, as the script runs and begins to encounter larger functions, processing will become slower. This is due to:
-- Decompilation of larger functions taking longer
-- AI response time increases as there is more data to process
