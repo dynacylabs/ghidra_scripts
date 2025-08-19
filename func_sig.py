@@ -1,3 +1,5 @@
+# @runtime PyGhidra
+
 from ghidra.program.model.data import IntegerDataType
 from ghidra.program.model.symbol import SourceType
 from ghidra.app.decompiler import DecompInterface
@@ -57,28 +59,51 @@ else:
         decompiled_code = decompile_result.getDecompiledFunction().getC()
         
         analysis_prompt = """
-You are analyzing a function from a binary reverse engineering task. The decompiler output for the function is provided below.
 
-Please:
-1. Identify how many parameters the function takes.
-2. Name each function parameter meaningfully based on the surrounding context provided in the decompiled output.
-3. Determine the data type for each parameter (use standard C types like `int`, `float`, `char*`, etc.).
-4. Determine the return type of the function.
+        You are a reverse engineer using ghidra.
+        You will receive the decompiler output from ghidra for a function.
+        You are to provide a function signature/definition based on the decompiler's output.
+        Do not update the function name.
+        You should respond with json data only with no extra information, commentary, or punctuation.
+        Determine the data type for each parameter (use standard C types like `int`, `float`, `char*`, etc.).
+        Determine the return type as well.
+        You should provide meaninful variable names as well based on the decompiler output.
+        Do not include any invalid characters (all characters should be acceptable as function names in c).
+"""
 
-Respond with the following format EXACTLY:
------
-Return Type: [return type]
-Parameters:
-1. [parameter type] [parameter name]
-2. [parameter type] [parameter name]
-3. ...
------
-Decompiled Function:
-{}
-""".format(decompiled_code)
+
+
+
+
+```json
+{
+  "return_type": "void",
+  "function_name": "FUN_000001a8",
+  "parameters": [
+    {
+      "type": "int*",
+      "name": "src"
+    },
+    {
+      "type": "int*",
+      "name": "dest"
+    },
+    {
+      "type": "int",
+      "name": "length"
+    }
+  ]
+}
+```
+
+
+
+
+
+
         ai_analyzer = AIFunctionAnalyzer(system_prompt=analysis_prompt)
 
-        ai_response = ai_analyzer.query(query=decompile_result)
+        ai_response = ai_analyzer.query(query=decompiled_code)
         print("AI Response Received:")
         print(ai_response)
 
