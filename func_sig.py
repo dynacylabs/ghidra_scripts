@@ -9,6 +9,14 @@ from langchain_openai import AzureChatOpenAI
 import httpx
 import os
 
+
+
+
+Error updating the function signature: No matching overloads found for ghidra.program.database.function.FunctionDB.addParameter(ghidra.program.model.data.PointerDataType,str,ghidra.program.model.symbol.SourceType), options are:
+	public ghidra.program.model.listing.Parameter ghidra.program.database.function.FunctionDB.addParameter(ghidra.program.model.listing.Variable,ghidra.program.model.symbol.SourceType) throws ghidra.util.exception.DuplicateNameException,ghidra.util.exception.InvalidInputException
+
+
+
 os.environ["AZURE_OPENAI_API_KEY"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
