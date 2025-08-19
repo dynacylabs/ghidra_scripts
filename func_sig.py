@@ -56,7 +56,7 @@ else:
     else:
         decompiled_code = decompile_result.getDecompiledFunction().getC()
         
-        analysis_prompt = f"""
+        analysis_prompt = """
 You are analyzing a function from a binary reverse engineering task. The decompiler output for the function is provided below.
 
 Please:
@@ -74,8 +74,8 @@ Parameters:
 3. ...
 -----
 Decompiled Function:
-{decompiled_code}
-"""
+{}
+""".format(decompiled_code)
         ai_analyzer = AIFunctionAnalyzer(system_prompt=analysis_prompt)
 
         ai_response = ai_analyzer.query(query=decompile_result)
