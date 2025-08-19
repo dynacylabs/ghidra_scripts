@@ -10,7 +10,9 @@ import httpx
 import os
 
 
-
+Error updating the function signature: No matching overloads found for ghidra.program.database.function.FunctionDB.replaceParameters(list,ghidra.program.model.symbol.SourceType), options are:
+	public void ghidra.program.database.function.FunctionDB.replaceParameters(ghidra.program.model.listing.Function$FunctionUpdateType,boolean,ghidra.program.model.symbol.SourceType,ghidra.program.model.listing.Variable[]) throws ghidra.util.exception.DuplicateNameException,ghidra.util.exception.InvalidInputException
+	public void ghidra.program.database.function.FunctionDB.replaceParameters(java.util.List,ghidra.program.model.listing.Function$FunctionUpdateType,boolean,ghidra.program.model.symbol.SourceType) throws ghidra.util.exception.DuplicateNameException,ghidra.util.exception.InvalidInputException
 
 
 os.environ["AZURE_OPENAI_API_KEY"] = ""
@@ -150,16 +152,18 @@ else:
         decompiled_code = decompile_result.getDecompiledFunction().getC()
 
         analysis_prompt = """
-
-        You are a reverse engineer using ghidra.
-        You will receive the decompiler output from ghidra for a function.
-        You are to provide a function signature/definition based on the decompiler's output.
-        Do not update the function name.
-        You should respond with json data only with no extra information, commentary, or punctuation.
-        Determine the data type for each parameter (use standard C types like `int`, `float`, `char*`, etc.).
-        Determine the return type as well.
-        You should provide meaninful variable names as well based on the decompiler output.
-        Do not include any invalid characters (all characters should be acceptable as function names in c).
+You are a reverse engineer using ghidra.
+You will receive the decompiler output from ghidra for a function.
+You are to provide a function signature/definition based on the decompiler's output.
+Do not update the function name.
+You should respond with json data only with no extra information, commentary, or punctuation.
+Determine the data type for each parameter (use standard C types like `int`, `float`, `char*`, etc.).
+Determine the return type as well.
+You should provide meaninful variable names as well based on the decompiler output.
+Do not include any invalid characters (all characters should be acceptable as function names in c).
+Respond with a json dict with 2 keys: return_type, parameters. return_type should be a standard C type.
+parameters should be an array of dicts, with each dict having a key for type and a key for name.
+type should be a standard C type.
 """
 
         ai_analyzer = AIFunctionAnalyzer(system_prompt=analysis_prompt)
