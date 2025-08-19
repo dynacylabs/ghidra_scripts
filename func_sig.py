@@ -10,11 +10,6 @@ import httpx
 import os
 
 
-Error updating the function signature: No matching overloads found for ghidra.program.database.function.FunctionDB.replaceParameters(list,ghidra.program.model.symbol.SourceType), options are:
-	public void ghidra.program.database.function.FunctionDB.replaceParameters(ghidra.program.model.listing.Function$FunctionUpdateType,boolean,ghidra.program.model.symbol.SourceType,ghidra.program.model.listing.Variable[]) throws ghidra.util.exception.DuplicateNameException,ghidra.util.exception.InvalidInputException
-	public void ghidra.program.database.function.FunctionDB.replaceParameters(java.util.List,ghidra.program.model.listing.Function$FunctionUpdateType,boolean,ghidra.program.model.symbol.SourceType) throws ghidra.util.exception.DuplicateNameException,ghidra.util.exception.InvalidInputException
-
-
 os.environ["AZURE_OPENAI_API_KEY"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
@@ -241,6 +236,7 @@ type should be a standard C type.
                 # Use the function manager to update the signature
                 function_manager = ghidra_program.getFunctionManager()
                 try:
+                    # Try the updateFunction method first
                     function_manager.updateFunction(
                         selected_function,
                         new_return_type,
@@ -248,21 +244,47 @@ type should be a standard C type.
                         param_names,
                         SourceType.USER_DEFINED
                     )
-                except:
-                    # Fallback approach: manually set parameters one by one
-                    # First remove all existing parameters
-                    selected_function.replaceParameters([], SourceType.USER_DEFINED)
-                    
-                    # Then add new parameters using the correct API
-                    from ghidra.program.model.listing import ParameterImpl
-                    from ghidra.program.model.data import ParameterDefinition, ParameterDefinitionImpl
-                    
-                    param_list = []
-                    for i, (param_data_type, param_name) in enumerate(zip(param_data_types, param_names)):
-                        param_def = ParameterDefinitionImpl(param_name, param_data_type, None)
-                        param_list.append(param_def)
-                    
-                    selected_function.replaceParameters(param_list, SourceType.USER_DEFINED)
+                except Exception as e:
+                    print(f"Primary update method failed: {e}")
+                    # Fallback approach: use replaceParameters with correct signature
+                    try:
+                        from ghidra.program.model.listing import Function
+                        
+                        # Create empty parameter array first to clear existing parameters
+                        empty_params = []
+                        selected_function.replaceParameters(
+                            empty_params,
+                            Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS,
+                            True,
+                            SourceType.USER_DEFINED
+                        )
+                        
+                        # Now add parameters one by one using a different approach
+                        for i, (param_data_type, param_name) in enumerate(zip(param_data_types, param_names)):
+                            try:
+                                from ghidra.program.model.listing import ParameterImpl
+                                param = ParameterImpl(param_name, param_data_type, ghidra_program)
+                                # Try to add the parameter
+                                selected_function.insertParameter(i, param, SourceType.USER_DEFINED)
+                            except Exception as param_e:
+                                print(f"Failed to add parameter {param_name}: {param_e}")
+                                
+                    except Exception as fallback_e:
+                        print(f"Fallback method also failed: {fallback_e}")
+                        # Last resort: try the older API
+                        try:
+                            # Clear parameters the old way
+                            while selected_function.getParameterCount() > 0:
+                                selected_function.removeParameter(0)
+                            
+                            # Add parameters using the basic method
+                            for param_data_type, param_name in zip(param_data_types, param_names):
+                                from ghidra.program.model.listing import ParameterImpl  
+                                param = ParameterImpl(param_name, param_data_type, ghidra_program)
+                                selected_function.addParameter(param, SourceType.USER_DEFINED)
+                        except Exception as last_e:
+                            print(f"All parameter update methods failed: {last_e}")
+                            raise last_e
 
                 print(
                     f"Function signature updated successfully with return type '{function_return_type}' and {len(function_parameters)} parameter(s)."
