@@ -159,6 +159,7 @@ Do not include any invalid characters (all characters should be acceptable as fu
 Respond with a json dict with 2 keys: return_type, parameters. return_type should be a standard C type.
 parameters should be an array of dicts, with each dict having a key for type and a key for name.
 type should be a standard C type.
+Force parameter naming to avoid generic names.
 """
 
         ai_analyzer = AIFunctionAnalyzer(system_prompt=analysis_prompt)
@@ -235,56 +236,21 @@ type should be a standard C type.
                 
                 # Use the function manager to update the signature
                 function_manager = ghidra_program.getFunctionManager()
+
+                # Last resort: try the older API
                 try:
-                    # Try the updateFunction method first
-                    function_manager.updateFunction(
-                        selected_function,
-                        new_return_type,
-                        param_data_types,
-                        param_names,
-                        SourceType.USER_DEFINED
-                    )
-                except Exception as e:
-                    print(f"Primary update method failed: {e}")
-                    # Fallback approach: use replaceParameters with correct signature
-                    try:
-                        from ghidra.program.model.listing import Function
-                        
-                        # Create empty parameter array first to clear existing parameters
-                        empty_params = []
-                        selected_function.replaceParameters(
-                            empty_params,
-                            Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS,
-                            True,
-                            SourceType.USER_DEFINED
-                        )
-                        
-                        # Now add parameters one by one using a different approach
-                        for i, (param_data_type, param_name) in enumerate(zip(param_data_types, param_names)):
-                            try:
-                                from ghidra.program.model.listing import ParameterImpl
-                                param = ParameterImpl(param_name, param_data_type, ghidra_program)
-                                # Try to add the parameter
-                                selected_function.insertParameter(i, param, SourceType.USER_DEFINED)
-                            except Exception as param_e:
-                                print(f"Failed to add parameter {param_name}: {param_e}")
-                                
-                    except Exception as fallback_e:
-                        print(f"Fallback method also failed: {fallback_e}")
-                        # Last resort: try the older API
-                        try:
-                            # Clear parameters the old way
-                            while selected_function.getParameterCount() > 0:
-                                selected_function.removeParameter(0)
-                            
-                            # Add parameters using the basic method
-                            for param_data_type, param_name in zip(param_data_types, param_names):
-                                from ghidra.program.model.listing import ParameterImpl  
-                                param = ParameterImpl(param_name, param_data_type, ghidra_program)
-                                selected_function.addParameter(param, SourceType.USER_DEFINED)
-                        except Exception as last_e:
-                            print(f"All parameter update methods failed: {last_e}")
-                            raise last_e
+                    # Clear parameters the old way
+                    while selected_function.getParameterCount() > 0:
+                        selected_function.removeParameter(0)
+                    
+                    # Add parameters using the basic method
+                    for param_data_type, param_name in zip(param_data_types, param_names):
+                        from ghidra.program.model.listing import ParameterImpl  
+                        param = ParameterImpl(param_name, param_data_type, ghidra_program)
+                        selected_function.addParameter(param, SourceType.USER_DEFINED)
+                except Exception as last_e:
+                    print(f"All parameter update methods failed: {last_e}")
+                    raise last_e
 
                 print(
                     f"Function signature updated successfully with return type '{function_return_type}' and {len(function_parameters)} parameter(s)."
