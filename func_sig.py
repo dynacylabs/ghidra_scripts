@@ -12,10 +12,6 @@ import os
 
 
 
-Error updating the function signature: No matching overloads found for ghidra.program.database.function.FunctionDB.addParameter(ghidra.program.model.data.PointerDataType,str,ghidra.program.model.symbol.SourceType), options are:
-	public ghidra.program.model.listing.Parameter ghidra.program.database.function.FunctionDB.addParameter(ghidra.program.model.listing.Variable,ghidra.program.model.symbol.SourceType) throws ghidra.util.exception.DuplicateNameException,ghidra.util.exception.InvalidInputException
-
-
 
 os.environ["AZURE_OPENAI_API_KEY"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
@@ -223,8 +219,10 @@ else:
                     new_return_type, SourceType.USER_DEFINED
                 )
 
-                selected_function.getParameters()[:] = []
-
+                # Create parameter data types and names for the function signature
+                param_data_types = []
+                param_names = []
+                
                 for param_type, param_name in function_parameters:
                     param_data_type = map_type_string_to_ghidra_type(param_type)
                     if param_data_type is None:
@@ -232,9 +230,35 @@ else:
                             f"Unrecognized parameter type '{param_type}'. Defaulting to `int`."
                         )
                         param_data_type = IntegerDataType()
-                    selected_function.addParameter(
-                        param_data_type, param_name, SourceType.USER_DEFINED
+                    
+                    param_data_types.append(param_data_type)
+                    param_names.append(param_name)
+                
+                # Use the function manager to update the signature
+                function_manager = ghidra_program.getFunctionManager()
+                try:
+                    function_manager.updateFunction(
+                        selected_function,
+                        new_return_type,
+                        param_data_types,
+                        param_names,
+                        SourceType.USER_DEFINED
                     )
+                except:
+                    # Fallback approach: manually set parameters one by one
+                    # First remove all existing parameters
+                    selected_function.replaceParameters([], SourceType.USER_DEFINED)
+                    
+                    # Then add new parameters using the correct API
+                    from ghidra.program.model.listing import ParameterImpl
+                    from ghidra.program.model.data import ParameterDefinition, ParameterDefinitionImpl
+                    
+                    param_list = []
+                    for i, (param_data_type, param_name) in enumerate(zip(param_data_types, param_names)):
+                        param_def = ParameterDefinitionImpl(param_name, param_data_type, None)
+                        param_list.append(param_def)
+                    
+                    selected_function.replaceParameters(param_list, SourceType.USER_DEFINED)
 
                 print(
                     f"Function signature updated successfully with return type '{function_return_type}' and {len(function_parameters)} parameter(s)."
