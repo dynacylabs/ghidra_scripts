@@ -62,7 +62,7 @@ os.environ["AZURE_OPENAI_API_KEY"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
 
-def _map_c_type_to_ghidra_type(self, type_string: str):
+def _map_c_type_to_ghidra_type(type_string: str):
     """
     Map C type strings to corresponding Ghidra data types.
 
@@ -649,7 +649,7 @@ class VariableRenamer:
             clean_response = clean_response.strip()
 
             # Parse JSON response
-            parsed_data = json.loads(clean_response)
+            mapping = json.loads(clean_response)
 
         except (json.JSONDecodeError, KeyError, AttributeError):
             mapping = None
@@ -663,13 +663,13 @@ class VariableRenamer:
         decompiled_code = self.decompile_function(target_function=target_function)
 
         if not decompiled_code:
-            print(f"Unable to rename variables for {function_name}")
+            print(f"Unable to rename/retype variables for {function_name}")
             return
 
         # Get AI-generated signature
         ai_response = self.ai_client.query(user_query=decompiled_code)
         if not ai_response:
-            print(f"Unable to rename variables for {function_name}")
+            print(f"Unable to rename/retype variables for {function_name}")
             return
 
         high_func = self.getHighFunc(function=target_function)
@@ -678,21 +678,27 @@ class VariableRenamer:
         mapping = self.parse_ai_signature_response(ai_response=ai_response)
 
         for symbol in local_symbols:
-            old_name = symbol.getName()
+            try:
+                old_name = symbol.getName()
             
-            new_name = mapping.get(old_name, {}).get("name")
-            data_type_string = mapping.get(old_name, {}).get("type")
+                new_name = mapping.get(old_name, {}).get("name")
+                data_type_string = mapping.get(old_name, {}).get("type")
 
-            data_type = _map_c_type_to_ghidra_type(type_string=data_type_string)
-            self.high_func_db_util.updateDBVariable(
-                high_func, new_name, data_type, SourceType.USER_DEFINED
-            )
-            self.high_func_db_util.commitParamsToDatabase(
-                high_func,
-                True,
-                HighFunctionDBUtil.ReturnCommitOption.COMMIT,
-                SourceType.USER_DEFINED,
-            )
+                data_type = _map_c_type_to_ghidra_type(type_string=data_type_string)
+                self.high_func_db_util.updateDBVariable(
+                    symbol, new_name, data_type, SourceType.USER_DEFINED
+                )
+                self.high_func_db_util.commitParamsToDatabase(
+                    high_func,
+                    True,
+                    HighFunctionDBUtil.ReturnCommitOption.COMMIT,
+                    SourceType.USER_DEFINED,
+                )
+
+                print(f"{target_function.getName()}.{symbol.getName()} -> {target_function.getName()}.{new_name}")
+            except Exception as e:
+                print(f"Unable to rename/retype {target_function.getName()}.{old_name}: {e}")
+
 
     def process_all_variables(self) -> None:
         """
@@ -1015,8 +1021,8 @@ def main() -> None:
     )
 
     should_rename_variables: bool = askYesNo(
-        "Rename Variables?",
-        "Should variables be renamed based on the function's decompiled "
+        "Rename/retype Variables?",
+        "Should variables be renamed/retype based on the function's decompiled "
         "output using AI analysis?",
     )
 
@@ -1029,7 +1035,7 @@ def main() -> None:
     # Initialize analysis classes based on user preferences
     function_renamer: Optional[FunctionRenamer] = None
     signature_generator: Optional[FunctionSignatureGenerator] = None
-    variable_renamer = Optional[VariableRenamer] = None
+    variable_renamer = None
     function_commenter: Optional[FunctionCommenter] = None
 
     if should_rename_functions:
