@@ -57,30 +57,7 @@ from ghidra.program.model.data import (
 from ghidra.program.model.listing import CodeUnit, ParameterImpl
 from ghidra.program.model.symbol import SourceType
 
-# Ghidra script global functions and variables
-# These are automatically available in Ghidra script environment
-try:
-    # These will be available when running in Ghidra
-    from __main__ import (
-        askString,
-        askYesNo,
-        getCurrentProgram,
-        monitor,
-    )
-except ImportError:
-    # Fallback for type checking and development environments
-    def askString(title: str, message: str) -> str:
-        return "3"
-    
-    def askYesNo(title: str, message: str) -> bool:
-        return True
-    
-    def getCurrentProgram():
-        return None
-    
-    monitor = None
-
-os.environ["AZURE_OPENAI_API_KEY"] = ""
+os.environ["AZURE_OPENAI_API_KEY"] = "682a97c3cb0241499579a8b76dacda94"
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
 
@@ -250,7 +227,7 @@ class FunctionRenamer:
             target_function: The Ghidra function to rename.
             decompiled_code: The decompiled C code of the function.
         """
-        new_function_name = self.ai_client.query(query=decompiled_code)
+        new_function_name = self.ai_client.query(user_query=decompiled_code)
         
         if new_function_name:
             try:
@@ -838,14 +815,14 @@ class FunctionSignatureGenerator:
         - Avoid generic names like 'param1', 'arg', 'temp'
         
         Response format:
-        {
+        {{
           "return_type": "int",
           "parameters": [
-            {"type": "int", "name": "device_id"},
-            {"type": "char*", "name": "buffer_ptr"},
-            {"type": "uint32_t", "name": "buffer_size"}
+            {{"type": "int", "name": "device_id"}},
+            {{"type": "char*", "name": "buffer_ptr"}},
+            {{"type": "uint32_t", "name": "buffer_size"}}
           ]
-        }
+        }}
         
         Provide meaningful parameter names that reflect their purpose in
         the function.
