@@ -59,16 +59,13 @@ from ghidra.program.model.symbol import SourceType
 
 # Ghidra script global functions and variables
 # These are automatically available in Ghidra script environment
-try:
-    # These will be available when running in Ghidra
-    from __main__ import (
-        askString,
-        askYesNo,
-        getCurrentProgram,
-        monitor,
-    )
-except ImportError:
-    # Fallback for type checking and development environments
+import sys
+
+# Check if we're running in Ghidra by looking for Ghidra modules
+IN_GHIDRA = any('ghidra' in module for module in sys.modules.keys())
+
+if not IN_GHIDRA:
+    # We're not in Ghidra environment, provide fallbacks for development
     def askString(title: str, message: str) -> str:
         return "3"
     
@@ -78,7 +75,16 @@ except ImportError:
     def getCurrentProgram():
         return None
     
-    monitor = None
+    # Create a dummy monitor class for development
+    class DummyMonitor:
+        def checkCancelled(self):
+            pass
+    
+    monitor = DummyMonitor()
+else:
+    # In Ghidra, these will be available as globals
+    # We can't import them, they're injected by Ghidra
+    pass
 
 os.environ["AZURE_OPENAI_API_KEY"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
@@ -863,6 +869,12 @@ def main() -> None:
     """
     # Initialize Ghidra program interfaces
     current_program = getCurrentProgram()
+    
+    # Check if we're running in Ghidra environment
+    if current_program is None:
+        print("Error: This script must be run within Ghidra environment")
+        return
+    
     program_listing = current_program.getListing()
     function_manager = current_program.getFunctionManager()
 
