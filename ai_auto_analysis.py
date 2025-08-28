@@ -57,35 +57,6 @@ from ghidra.program.model.data import (
 from ghidra.program.model.listing import CodeUnit, ParameterImpl
 from ghidra.program.model.symbol import SourceType
 
-# Ghidra script global functions and variables
-# These are automatically available in Ghidra script environment
-import sys
-
-# Check if we're running in Ghidra by looking for Ghidra modules
-IN_GHIDRA = any('ghidra' in module for module in sys.modules.keys())
-
-if not IN_GHIDRA:
-    # We're not in Ghidra environment, provide fallbacks for development
-    def askString(title: str, message: str) -> str:
-        return "3"
-    
-    def askYesNo(title: str, message: str) -> bool:
-        return True
-    
-    def getCurrentProgram():
-        return None
-    
-    # Create a dummy monitor class for development
-    class DummyMonitor:
-        def checkCancelled(self):
-            pass
-    
-    monitor = DummyMonitor()
-else:
-    # In Ghidra, these will be available as globals
-    # We can't import them, they're injected by Ghidra
-    pass
-
 os.environ["AZURE_OPENAI_API_KEY"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
@@ -256,7 +227,7 @@ class FunctionRenamer:
             target_function: The Ghidra function to rename.
             decompiled_code: The decompiled C code of the function.
         """
-        new_function_name = self.ai_client.query(query=decompiled_code)
+        new_function_name = self.ai_client.query(user_query=decompiled_code)
         
         if new_function_name:
             try:
@@ -844,14 +815,14 @@ class FunctionSignatureGenerator:
         - Avoid generic names like 'param1', 'arg', 'temp'
         
         Response format:
-        {
+        {{
           "return_type": "int",
           "parameters": [
-            {"type": "int", "name": "device_id"},
-            {"type": "char*", "name": "buffer_ptr"},
-            {"type": "uint32_t", "name": "buffer_size"}
+            {{"type": "int", "name": "device_id"}},
+            {{"type": "char*", "name": "buffer_ptr"}},
+            {{"type": "uint32_t", "name": "buffer_size"}}
           ]
-        }
+        }}
         
         Provide meaningful parameter names that reflect their purpose in
         the function.
