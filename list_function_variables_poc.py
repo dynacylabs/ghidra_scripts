@@ -110,13 +110,18 @@ else:
                         new_name = askString("Rename Parameter", f"Enter new name for parameter '{current_name}' (or press Cancel/Enter to skip):")
                         if new_name and new_name.strip() and new_name != current_name:
                             try:
-                                # Rename the parameter in the function signature
-                                if i < target_function.getParameterCount():
-                                    function_param = target_function.getParameter(i)
-                                    function_param.setName(new_name.strip(), SourceType.USER_DEFINED)
-                                    print(f"    ✓ Renamed '{current_name}' to '{new_name}'")
-                                else:
-                                    print(f"    ✗ Could not rename '{current_name}'")
+                                # Start a transaction for the change
+                                transaction_id = current_program.startTransaction("Rename Parameter")
+                                try:
+                                    # Rename the parameter in the function signature
+                                    if i < target_function.getParameterCount():
+                                        function_param = target_function.getParameter(i)
+                                        function_param.setName(new_name.strip(), SourceType.USER_DEFINED)
+                                        print(f"    ✓ Renamed '{current_name}' to '{new_name}'")
+                                    else:
+                                        print(f"    ✗ Parameter index out of range for '{current_name}'")
+                                finally:
+                                    current_program.endTransaction(transaction_id, True)
                             except Exception as e:
                                 print(f"    ✗ Error renaming '{current_name}': {e}")
                 
@@ -133,21 +138,41 @@ else:
                         new_name = askString("Rename Local Variable", f"Enter new name for variable '{current_name}' (or press Cancel/Enter to skip):")
                         if new_name and new_name.strip() and new_name != current_name:
                             try:
-                                # Try to rename the local variable
-                                if hasattr(symbol, 'getSymbol'):
-                                    actual_symbol = symbol.getSymbol()
-                                    if actual_symbol:
-                                        actual_symbol.setName(new_name.strip(), SourceType.USER_DEFINED)
+                                # Start a transaction for the change
+                                transaction_id = current_program.startTransaction("Rename Local Variable")
+                                try:
+                                    # Try different methods to rename local variables
+                                    renamed = False
+                                    
+                                    # Method 1: Try through the symbol directly
+                                    if hasattr(symbol, 'getSymbol'):
+                                        actual_symbol = symbol.getSymbol()
+                                        if actual_symbol and hasattr(actual_symbol, 'setName'):
+                                            actual_symbol.setName(new_name.strip(), SourceType.USER_DEFINED)
+                                            renamed = True
+                                    
+                                    # Method 2: Try through HighLocal if it has a symbol
+                                    if not renamed and hasattr(symbol, 'setName'):
+                                        symbol.setName(new_name.strip())
+                                        renamed = True
+                                    
+                                    # Method 3: Try through symbol table
+                                    if not renamed:
+                                        symbol_table = current_program.getSymbolTable()
+                                        symbols = symbol_table.getSymbols(current_name, target_function)
+                                        for sym in symbols:
+                                            if sym.getParentNamespace() == target_function:
+                                                sym.setName(new_name.strip(), SourceType.USER_DEFINED)
+                                                renamed = True
+                                                break
+                                    
+                                    if renamed:
                                         print(f"    ✓ Renamed '{current_name}' to '{new_name}'")
                                     else:
-                                        print(f"    ✗ Could not access symbol for '{current_name}'")
-                                else:
-                                    # Alternative method for local variables
-                                    try:
-                                        local_map.renameSymbol(symbol, new_name.strip())
-                                        print(f"    ✓ Renamed '{current_name}' to '{new_name}'")
-                                    except:
-                                        print(f"    ✗ Could not rename local variable '{current_name}'")
+                                        print(f"    ✗ Could not rename local variable '{current_name}' - no available method")
+                                        
+                                finally:
+                                    current_program.endTransaction(transaction_id, True)
                             except Exception as e:
                                 print(f"    ✗ Error renaming '{current_name}': {e}")
                 
