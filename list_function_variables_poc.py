@@ -13,6 +13,7 @@ The script will try to auto-detect the function at your current location.
 """
 
 from ghidra.app.decompiler import DecompInterface
+from ghidra.program.model.symbol import SourceType
 
 def get_current_function():
     """Try to get the function at the current cursor location."""
@@ -101,24 +102,68 @@ else:
                     param_count = prototype.getNumParams()
                     for i in range(param_count):
                         param = prototype.getParam(i)
-                        print("  " + param.getName() + " (" + param.getDataType().getDisplayName() + ")")
+                        current_name = param.getName()
+                        data_type = param.getDataType().getDisplayName()
+                        print(f"  {current_name} ({data_type})")
+                        
+                        # Ask user for new name
+                        new_name = askString("Rename Parameter", f"Enter new name for parameter '{current_name}' (or press Cancel/Enter to skip):")
+                        if new_name and new_name.strip() and new_name != current_name:
+                            try:
+                                # Rename the parameter in the function signature
+                                if i < target_function.getParameterCount():
+                                    function_param = target_function.getParameter(i)
+                                    function_param.setName(new_name.strip(), SourceType.USER_DEFINED)
+                                    print(f"    ✓ Renamed '{current_name}' to '{new_name}'")
+                                else:
+                                    print(f"    ✗ Could not rename '{current_name}'")
+                            except Exception as e:
+                                print(f"    ✗ Error renaming '{current_name}': {e}")
                 
                 print("\nLOCAL VARIABLES:")
                 local_map = high_function.getLocalSymbolMap()
                 for symbol in local_map.getSymbols():
                     if not (hasattr(symbol, 'isParameter') and symbol.isParameter()):
                         local_count += 1
-                        print("  " + symbol.getName() + " (" + symbol.getDataType().getDisplayName() + ")")
+                        current_name = symbol.getName()
+                        data_type = symbol.getDataType().getDisplayName()
+                        print(f"  {current_name} ({data_type})")
+                        
+                        # Ask user for new name
+                        new_name = askString("Rename Local Variable", f"Enter new name for variable '{current_name}' (or press Cancel/Enter to skip):")
+                        if new_name and new_name.strip() and new_name != current_name:
+                            try:
+                                # Try to rename the local variable
+                                if hasattr(symbol, 'getSymbol'):
+                                    actual_symbol = symbol.getSymbol()
+                                    if actual_symbol:
+                                        actual_symbol.setName(new_name.strip(), SourceType.USER_DEFINED)
+                                        print(f"    ✓ Renamed '{current_name}' to '{new_name}'")
+                                    else:
+                                        print(f"    ✗ Could not access symbol for '{current_name}'")
+                                else:
+                                    # Alternative method for local variables
+                                    try:
+                                        local_map.renameSymbol(symbol, new_name.strip())
+                                        print(f"    ✓ Renamed '{current_name}' to '{new_name}'")
+                                    except:
+                                        print(f"    ✗ Could not rename local variable '{current_name}'")
+                            except Exception as e:
+                                print(f"    ✗ Error renaming '{current_name}': {e}")
                 
                 print("\nGLOBAL REFERENCES:")
                 global_map = high_function.getGlobalSymbolMap()
                 for symbol in global_map.getSymbols():
                     global_count += 1
+                    current_name = symbol.getName()
                     try:
                         data_type = symbol.getDataType().getDisplayName()
                     except:
                         data_type = "unknown"
-                    print("  " + symbol.getName() + " (" + data_type + ")")
+                    print(f"  {current_name} ({data_type})")
+                    
+                    # Note: Global variables typically can't be renamed from function context
+                    print(f"    (Global variable - renaming not supported)")
                 
                 print("\n" + "=" * 60)
                 print("SUMMARY:")
@@ -127,9 +172,19 @@ else:
                 print("  Global references: " + str(global_count))
                 print("  TOTAL: " + str(param_count + local_count + global_count))
                 
-                print("\nDECOMPILED CODE:")
-                print("-" * 60)
-                print(result.getDecompiledFunction().getC())
+                # Ask if user wants to see the decompiled code
+                show_code = askYesNo("Show Decompiled Code", "Would you like to see the decompiled code after renaming?")
+                if show_code:
+                    print("\nDECOMPILED CODE (after renaming):")
+                    print("-" * 60)
+                    # Re-decompile to show updated names
+                    fresh_result = decompiler.decompileFunction(target_function, 30, None)
+                    if fresh_result and fresh_result.decompileCompleted():
+                        print(fresh_result.getDecompiledFunction().getC())
+                    else:
+                        print("Could not re-decompile function to show updated code")
+                
+                print("\nVariable renaming complete!")
                 
             else:
                 print("Error: Could not get high-level function representation")
