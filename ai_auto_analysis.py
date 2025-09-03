@@ -2180,7 +2180,3 @@ if __name__ == "__main__":
     either through the Script Manager or directly through the Ghidra API.
     """
     main()
-<<<<<<< HEAD
-=======
-
->>>>>>> b222b90a2998b28602e043733f7024982d7c2c60
