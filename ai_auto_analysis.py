@@ -46,7 +46,7 @@ from ghidra.program.model.listing import CodeUnit, ParameterImpl, Variable
 from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
 
-os.environ["AZURE_OPENAI_API_KEY"] = ""
+os.environ["AZURE_OPENAI_API_KEY"] = "682a97c3cb0241499579a8b76dacda94"
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
 
@@ -703,12 +703,10 @@ class StructGenerator:
             system_prompt=self._get_struct_generator_prompt()
         )
         
-        # Global registry to track structs created across all functions
         self.global_struct_registry = {}
         self._initialize_struct_registry()
 
     def _initialize_struct_registry(self):
-        """Initialize the struct registry with any existing AI-generated structs."""
         try:
             category_path = CategoryPath("/AI_Generated_Structs")
             category = self.data_type_manager.getCategory(category_path)
@@ -827,35 +825,26 @@ class StructGenerator:
         return IntegerDataType()
     
     def find_existing_struct(self, struct_name: str) -> Optional[Structure]:
-        """
-        Find an existing struct by name in the data type manager.
-        This handles conflict resolution by also checking for .conflict variants.
-        """
         category_path = CategoryPath("/AI_Generated_Structs")
         
-        # Check for exact name match first
         existing_dt = self.data_type_manager.getDataType(category_path, struct_name)
         if existing_dt and isinstance(existing_dt, Structure):
             return existing_dt
         
-        # Check for conflict names (e.g., StructName.conflict, StructName.conflict1, etc.)
         category = self.data_type_manager.getCategory(category_path)
         if category:
             for dt in category.getDataTypes():
                 if isinstance(dt, Structure):
                     dt_name = dt.getName()
-                    # Check if this is a conflict version of our struct
                     if dt_name.startswith(struct_name) and ('.conflict' in dt_name):
                         return dt
         
         return None
 
     def are_structs_compatible(self, existing_struct: Structure, new_fields: List[Dict]) -> bool:
-        """Check if a new struct definition is compatible with an existing struct."""
         if not existing_struct or not new_fields:
             return False
         
-        # Create a map of existing field offsets to their types and names
         existing_fields = {}
         for i in range(existing_struct.getNumComponents()):
             component = existing_struct.getComponent(i)
@@ -870,7 +859,6 @@ class StructGenerator:
         conflicts = 0
         compatible_fields = 0
         
-        # Check if new fields are compatible with existing ones
         for field in new_fields:
             field_offset = field.get("offset", 0)
             field_name = field.get("name", "unknown_field")
@@ -880,7 +868,6 @@ class StructGenerator:
                 existing_field = existing_fields[field_offset]
                 new_field_type = self.map_c_type_to_ghidra_type(field_type_str)
                 
-                # Check if types are compatible (same type or compatible sizes)
                 if self.are_types_compatible(existing_field['type'], new_field_type):
                     compatible_fields += 1
                     print(f"Compatible field at offset {field_offset}: {field_name}")
@@ -888,40 +875,31 @@ class StructGenerator:
                     conflicts += 1
                     print(f"Type conflict at offset {field_offset}: existing={existing_field['type']}, new={new_field_type}")
             else:
-                # New field at unused offset - this is always compatible
                 compatible_fields += 1
         
-        # Consider structs compatible if there are more compatible fields than conflicts
-        # and if conflicts are less than 50% of overlapping fields
         total_overlapping = conflicts + compatible_fields
         if total_overlapping == 0:
-            return True  # No overlapping fields
+            return True
         
         compatibility_ratio = compatible_fields / total_overlapping
         print(f"Struct compatibility: {compatible_fields}/{total_overlapping} fields compatible ({compatibility_ratio:.2%})")
         
-        return compatibility_ratio >= 0.5  # At least 50% compatibility required
+        return compatibility_ratio >= 0.5
 
     def are_types_compatible(self, type1, type2) -> bool:
-        """Check if two data types are compatible."""
         if type1.equals(type2):
             return True
         
-        # Check if they have the same size (allowing for equivalent types)
         if hasattr(type1, 'getLength') and hasattr(type2, 'getLength'):
             if type1.getLength() == type2.getLength():
-                # Same size types are often interchangeable
                 return True
         
-        # Check for pointer types
         if (isinstance(type1, PointerDataType) and isinstance(type2, PointerDataType)):
-            return True  # All pointers are the same size, assume compatible
+            return True
             
-        # Check for specific type equivalencies
         type1_name = type1.getName().lower() if hasattr(type1, 'getName') else str(type1).lower()
         type2_name = type2.getName().lower() if hasattr(type2, 'getName') else str(type2).lower()
         
-        # Define equivalent type groups
         integer_types = {'int', 'integer', 'signed int', 'int32', 'int32_t'}
         unsigned_types = {'unsigned int', 'uint', 'uint32', 'uint32_t', 'unsigned'}
         char_types = {'char', 'int8', 'int8_t', 'byte'}
@@ -938,13 +916,10 @@ class StructGenerator:
         return False
 
     def merge_struct_fields(self, existing_struct: Structure, new_fields: List[Dict]) -> Structure:
-        """Merge new fields into an existing struct."""
         try:
-            # Create a copy of the existing struct to modify
             category_path = CategoryPath("/AI_Generated_Structs")
             merged_struct = StructureDataType(category_path, existing_struct.getName(), existing_struct.getLength())
             
-            # Copy existing components
             for i in range(existing_struct.getNumComponents()):
                 component = existing_struct.getComponent(i)
                 if component and not component.isUndefined():
@@ -959,7 +934,6 @@ class StructGenerator:
                     except Exception as e:
                         print(f"Warning: Could not copy existing field at offset {component.getOffset()}: {e}")
             
-            # Add new fields that don't conflict
             fields_added = 0
             for field in new_fields:
                 field_name = field.get("name", "unknown_field")
@@ -968,7 +942,6 @@ class StructGenerator:
                 
                 field_data_type = self.map_c_type_to_ghidra_type(field_type_str)
                 
-                # Check if this offset already has a field
                 existing_component = None
                 for i in range(merged_struct.getNumComponents()):
                     comp = merged_struct.getComponent(i)
@@ -989,7 +962,6 @@ class StructGenerator:
             else:
                 print(f"No new fields added to existing struct '{existing_struct.getName()}'")
             
-            # Resolve the merged struct
             resolved_struct = self.data_type_manager.resolve(merged_struct, None)
             return resolved_struct
             
@@ -1006,19 +978,16 @@ class StructGenerator:
         fields = struct_def.get("fields", [])
 
         try:
-            # Check if a similar struct already exists
             existing_struct = self.find_existing_struct(struct_name)
             
             if existing_struct:
                 print(f"Found existing struct: {existing_struct.getName()}")
                 
-                # Check if the new struct is compatible with the existing one
                 if self.are_structs_compatible(existing_struct, fields):
                     print(f"Structs are compatible, merging fields...")
                     return self.merge_struct_fields(existing_struct, fields)
                 else:
                     print(f"Structs are incompatible, creating new struct with modified name")
-                    # Create a new struct with a different name to avoid conflicts
                     counter = 1
                     while True:
                         new_name = f"{struct_name}_variant{counter}"
@@ -1027,7 +996,6 @@ class StructGenerator:
                             break
                         counter += 1
             
-            # Create new struct
             category_path = CategoryPath("/AI_Generated_Structs")
             struct_dt = StructureDataType(category_path, struct_name, 0)
 
@@ -1071,14 +1039,12 @@ class StructGenerator:
             struct_name = mapping.get("struct_name", "")
             is_pointer = mapping.get("is_pointer", False)
 
-            # First check created_structs, then fall back to global registry
             struct_dt = None
             if struct_name in created_structs:
                 struct_dt = created_structs[struct_name]
             elif struct_name in self.global_struct_registry:
                 struct_dt = self.global_struct_registry[struct_name]
             else:
-                # Try to find by partial name match (in case of conflict names)
                 for name, struct in self.global_struct_registry.items():
                     if name.startswith(struct_name):
                         struct_dt = struct
@@ -1127,35 +1093,36 @@ class StructGenerator:
         if not ai_response:
             print(f"Unable to generate structs for {function_name}")
             return
-
-        parsed_response = self.parse_ai_struct_response(ai_response=ai_response)
-
-        created_structs = {}
-        structs_data = parsed_response.get("structs", [])
         
-        for struct_def in structs_data:
-            struct_name = struct_def.get("name", "")
-            
-            # Check if we already have this struct in our global registry
-            if struct_name in self.global_struct_registry:
-                print(f"Reusing existing struct from registry: {struct_name}")
-                created_structs[struct_name] = self.global_struct_registry[struct_name]
-            else:
-                # Create the struct (this will handle conflicts and merging)
-                created_struct = self.create_struct_in_ghidra(struct_def)
-                if created_struct:
-                    # Store the actual name that was used (might be different due to conflicts)
-                    actual_name = created_struct.getName()
-                    created_structs[struct_name] = created_struct
-                    self.global_struct_registry[actual_name] = created_struct
-                    
-                    # Also register under the original name for easy lookup
-                    if actual_name != struct_name:
-                        self.global_struct_registry[struct_name] = created_struct
+        try:
 
-        variable_mappings = parsed_response.get("variable_mappings", [])
-        if variable_mappings and created_structs:
-            self.apply_struct_to_variables(target_function, variable_mappings, created_structs)
+            parsed_response = self.parse_ai_struct_response(ai_response=ai_response)
+
+            created_structs = {}
+            structs_data = parsed_response.get("structs", [])
+            
+            for struct_def in structs_data:
+                struct_name = struct_def.get("name", "")
+                
+                if struct_name in self.global_struct_registry:
+                    print(f"Reusing existing struct from registry: {struct_name}")
+                    created_structs[struct_name] = self.global_struct_registry[struct_name]
+                else:
+                    created_struct = self.create_struct_in_ghidra(struct_def)
+                    if created_struct:
+                        actual_name = created_struct.getName()
+                        created_structs[struct_name] = created_struct
+                        self.global_struct_registry[actual_name] = created_struct
+                        
+                        if actual_name != struct_name:
+                            self.global_struct_registry[struct_name] = created_struct
+
+            variable_mappings = parsed_response.get("variable_mappings", [])
+            if variable_mappings and created_structs:
+                self.apply_struct_to_variables(target_function, variable_mappings, created_structs)
+    
+        except Exception as e:
+            print(f"Unable to generate structs for {function_name}: {e}")
 
     def process_all_functions(self) -> None:
         all_functions = list(self.function_manager.getFunctions(True))
@@ -1207,8 +1174,8 @@ class StructGenerator:
             ]
         }}
         
-        Provide meaningful names that reflect their purpose in
-        the function.
+        Provide meaningful names that reflect their purpose in the function.
+        Be sure sure to only generate full, valid json that can be parsed by python's json library.
         """
 
 
