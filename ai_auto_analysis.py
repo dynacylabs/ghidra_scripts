@@ -79,7 +79,7 @@ from ghidra.program.model.symbol import SourceType
 
 # Azure OpenAI configuration - stored in environment variables for security
 os.environ["AZURE_OPENAI_API_KEY"] = ""
-os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
+os.environ["AZURE_OPENAI_ENDPOINT"] = ""
 
 
 def _map_c_type_to_ghidra_type(type_string: str):
@@ -2165,3 +2165,4 @@ if __name__ == "__main__":
     either through the Script Manager or directly through the Ghidra API.
     """
     main()
+
