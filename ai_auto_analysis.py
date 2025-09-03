@@ -46,7 +46,7 @@ from ghidra.program.model.listing import CodeUnit, ParameterImpl, Variable
 from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
 
-os.environ["AZURE_OPENAI_API_KEY"] = ""
+os.environ["AZURE_OPENAI_API_KEY"] = "682a97c3cb0241499579a8b76dacda94"
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
 
@@ -689,6 +689,7 @@ class StructGenerator:
         decompiler_interface=None,
         reference_manager=None,
         high_func_db_util=None,
+        data_type_manager=None,
     ) -> None:
         self.current_program = current_program
         self.program_listing = program_listing
@@ -696,6 +697,7 @@ class StructGenerator:
         self.decompiler_interface = decompiler_interface
         self.reference_manager = reference_manager
         self.high_func_db_util = high_func_db_util
+        self.data_type_manager = data_type_manager
 
         self.ai_client = AzureOpenAIClient(
             system_prompt=self._get_struct_generator_prompt()
@@ -729,7 +731,6 @@ class StructGenerator:
             if clean_response.endswith("```"):
                 clean_response = clean_response[:-3]
             clean_response = clean_response.strip()
-
             mapping = json.loads(clean_response)
 
         except (json.JSONDecodeError, KeyError, AttributeError):
@@ -816,7 +817,6 @@ class StructGenerator:
         fields = struct_def.get("fields", [])
 
         try:
-            # Create a new structure
             category_path = CategoryPath("/AI_Generated_Structs")
             struct_dt = StructureDataType(category_path, struct_name, 0)
 
@@ -848,7 +848,7 @@ class StructGenerator:
     
     def apply_struct_to_variables(self, target_function, struct_mappings: List[Dict], 
                                 created_structs: Dict[str, Structure]):
-        high_function = self.get_high_function(target_function)
+        high_function = self.getHighFunc(target_function)
         if not high_function:
             print("Could not get high function for variable mapping")
             return
@@ -918,7 +918,7 @@ class StructGenerator:
 
         variable_mappings = parsed_response.get("variable_mappings", [])
         if variable_mappings and created_structs:
-            self.apply_struct_to_variables(selected_function, variable_mappings, created_structs)
+            self.apply_struct_to_variables(target_function, variable_mappings, created_structs)
 
     def process_all_functions(self) -> None:
         all_functions = list(self.function_manager.getFunctions(True))
@@ -965,8 +965,8 @@ class StructGenerator:
                 }}
             ],
             "variable_mappings": [
-                {{"variable_name": "param_1", "struct_name": "DeviceConfig", "is_pointer": True}},
-                {{"variable_name": "local_status", "struct_name": "StatusInfo", "is_pointer": False}}
+                {{"variable_name": "param_1", "struct_name": "DeviceConfig", "is_pointer": true}},
+                {{"variable_name": "local_status", "struct_name": "StatusInfo", "is_pointer": false}}
             ]
         }}
         
@@ -991,6 +991,8 @@ def main() -> None:
     reference_manager = current_program.getReferenceManager()
 
     high_func_db_util = HighFunctionDBUtil()
+
+    data_type_manager = current_program.getDataTypeManager()
 
     should_rename_functions: bool = askYesNo(
         "Rename Functions?",
@@ -1075,6 +1077,7 @@ def main() -> None:
             decompiler_interface=decompiler_interface,
             reference_manager=reference_manager,
             high_func_db_util=high_func_db_util,
+            data_type_manager=data_type_manager,
         )
 
     if should_rename_functions and function_renamer:
