@@ -1,3 +1,4 @@
+# @runtime PyGhidra
 """
 AI-Powered Ghidra Auto Analysis Script
 
@@ -18,11 +19,10 @@ The script uses Azure OpenAI's GPT-4 model to analyze decompiled code and genera
 human-readable names, types, and documentation.
 """
 
-# @runtime PyGhidra
-
 # Standard library imports for JSON handling, OS operations, and collections
 import json
 import os
+import time
 from collections import defaultdict, deque
 
 # Type hints for better code documentation and IDE support
@@ -212,26 +212,41 @@ class AzureOpenAIClient:
 
     def query(self, user_query: str = "") -> Optional[str]:
         """
-        Send a query to the AI model and return the response.
+        Send a query to the AI model and return the response with retry strategy.
+        
+        Implements exponential backoff retry strategy:
+        - Retries up to 3 times on failure
+        - Uses exponential backoff: 1s, 2s, 4s delays
+        - Returns None if all retries are exhausted
         
         Args:
             user_query (str): The user's input/question to send to the AI model
             
         Returns:
-            Optional[str]: The AI's response as a string, or None if the query failed
+            Optional[str]: The AI's response as a string, or None if all retries failed
             
         Example:
             >>> client = AzureOpenAIClient("You are a helpful assistant")
             >>> response = client.query("What is reverse engineering?")
             >>> print(response)
         """
-        try:
-            # Invoke the LangChain pipeline with the user's query
-            return self.chain.invoke({"input": user_query})
-        except Exception as error:
-            # Log the error and return None to indicate failure
-            print(f"AI query failed: query='{user_query}', error={error}")
-            return None
+        max_retries = 3
+        base_delay = 1.0  # Base delay in seconds
+        
+        for attempt in range(max_retries):
+            try:
+                # Invoke the LangChain pipeline with the user's query
+                return self.chain.invoke({"input": user_query})
+            except Exception as error:
+                # Calculate delay for exponential backoff: 1s, 2s, 4s
+                delay = base_delay * (2 ** attempt)
+                
+                # Log the error with attempt information
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                else:
+                    print(f"AI query failed after {max_retries} attempts: query='{user_query}', error={error}")
+                    return None
 
     def _get_langchain_pipeline(self):
         """
