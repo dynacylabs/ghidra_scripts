@@ -46,7 +46,7 @@ from ghidra.program.model.listing import CodeUnit, ParameterImpl, Variable
 from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
 
-os.environ["AZURE_OPENAI_API_KEY"] = "682a97c3cb0241499579a8b76dacda94"
+os.environ["AZURE_OPENAI_API_KEY"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
 
@@ -702,6 +702,24 @@ class StructGenerator:
         self.ai_client = AzureOpenAIClient(
             system_prompt=self._get_struct_generator_prompt()
         )
+        
+        # Global registry to track structs created across all functions
+        self.global_struct_registry = {}
+        self._initialize_struct_registry()
+
+    def _initialize_struct_registry(self):
+        """Initialize the struct registry with any existing AI-generated structs."""
+        try:
+            category_path = CategoryPath("/AI_Generated_Structs")
+            category = self.data_type_manager.getCategory(category_path)
+            
+            if category:
+                for dt in category.getDataTypes():
+                    if isinstance(dt, Structure):
+                        self.global_struct_registry[dt.getName()] = dt
+                        print(f"Loaded existing struct into registry: {dt.getName()}")
+        except Exception as e:
+            print(f"Warning: Could not initialize struct registry: {e}")
 
     def decompile_function(self, target_function) -> Optional[str]:
         decompilation_result = self.decompiler_interface.decompileFunction(
@@ -808,6 +826,177 @@ class StructGenerator:
         print(f"Warning: Unknown type '{type_string}', defaulting to int")
         return IntegerDataType()
     
+    def find_existing_struct(self, struct_name: str) -> Optional[Structure]:
+        """
+        Find an existing struct by name in the data type manager.
+        This handles conflict resolution by also checking for .conflict variants.
+        """
+        category_path = CategoryPath("/AI_Generated_Structs")
+        
+        # Check for exact name match first
+        existing_dt = self.data_type_manager.getDataType(category_path, struct_name)
+        if existing_dt and isinstance(existing_dt, Structure):
+            return existing_dt
+        
+        # Check for conflict names (e.g., StructName.conflict, StructName.conflict1, etc.)
+        category = self.data_type_manager.getCategory(category_path)
+        if category:
+            for dt in category.getDataTypes():
+                if isinstance(dt, Structure):
+                    dt_name = dt.getName()
+                    # Check if this is a conflict version of our struct
+                    if dt_name.startswith(struct_name) and ('.conflict' in dt_name):
+                        return dt
+        
+        return None
+
+    def are_structs_compatible(self, existing_struct: Structure, new_fields: List[Dict]) -> bool:
+        """Check if a new struct definition is compatible with an existing struct."""
+        if not existing_struct or not new_fields:
+            return False
+        
+        # Create a map of existing field offsets to their types and names
+        existing_fields = {}
+        for i in range(existing_struct.getNumComponents()):
+            component = existing_struct.getComponent(i)
+            if component and not component.isUndefined():
+                offset = component.getOffset()
+                existing_fields[offset] = {
+                    'name': component.getFieldName(),
+                    'type': component.getDataType(),
+                    'length': component.getLength()
+                }
+        
+        conflicts = 0
+        compatible_fields = 0
+        
+        # Check if new fields are compatible with existing ones
+        for field in new_fields:
+            field_offset = field.get("offset", 0)
+            field_name = field.get("name", "unknown_field")
+            field_type_str = field.get("type", "int")
+            
+            if field_offset in existing_fields:
+                existing_field = existing_fields[field_offset]
+                new_field_type = self.map_c_type_to_ghidra_type(field_type_str)
+                
+                # Check if types are compatible (same type or compatible sizes)
+                if self.are_types_compatible(existing_field['type'], new_field_type):
+                    compatible_fields += 1
+                    print(f"Compatible field at offset {field_offset}: {field_name}")
+                else:
+                    conflicts += 1
+                    print(f"Type conflict at offset {field_offset}: existing={existing_field['type']}, new={new_field_type}")
+            else:
+                # New field at unused offset - this is always compatible
+                compatible_fields += 1
+        
+        # Consider structs compatible if there are more compatible fields than conflicts
+        # and if conflicts are less than 50% of overlapping fields
+        total_overlapping = conflicts + compatible_fields
+        if total_overlapping == 0:
+            return True  # No overlapping fields
+        
+        compatibility_ratio = compatible_fields / total_overlapping
+        print(f"Struct compatibility: {compatible_fields}/{total_overlapping} fields compatible ({compatibility_ratio:.2%})")
+        
+        return compatibility_ratio >= 0.5  # At least 50% compatibility required
+
+    def are_types_compatible(self, type1, type2) -> bool:
+        """Check if two data types are compatible."""
+        if type1.equals(type2):
+            return True
+        
+        # Check if they have the same size (allowing for equivalent types)
+        if hasattr(type1, 'getLength') and hasattr(type2, 'getLength'):
+            if type1.getLength() == type2.getLength():
+                # Same size types are often interchangeable
+                return True
+        
+        # Check for pointer types
+        if (isinstance(type1, PointerDataType) and isinstance(type2, PointerDataType)):
+            return True  # All pointers are the same size, assume compatible
+            
+        # Check for specific type equivalencies
+        type1_name = type1.getName().lower() if hasattr(type1, 'getName') else str(type1).lower()
+        type2_name = type2.getName().lower() if hasattr(type2, 'getName') else str(type2).lower()
+        
+        # Define equivalent type groups
+        integer_types = {'int', 'integer', 'signed int', 'int32', 'int32_t'}
+        unsigned_types = {'unsigned int', 'uint', 'uint32', 'uint32_t', 'unsigned'}
+        char_types = {'char', 'int8', 'int8_t', 'byte'}
+        uchar_types = {'unsigned char', 'uchar', 'uint8', 'uint8_t'}
+        short_types = {'short', 'int16', 'int16_t'}
+        ushort_types = {'unsigned short', 'ushort', 'uint16', 'uint16_t'}
+        
+        type_groups = [integer_types, unsigned_types, char_types, uchar_types, short_types, ushort_types]
+        
+        for group in type_groups:
+            if type1_name in group and type2_name in group:
+                return True
+        
+        return False
+
+    def merge_struct_fields(self, existing_struct: Structure, new_fields: List[Dict]) -> Structure:
+        """Merge new fields into an existing struct."""
+        try:
+            # Create a copy of the existing struct to modify
+            category_path = CategoryPath("/AI_Generated_Structs")
+            merged_struct = StructureDataType(category_path, existing_struct.getName(), existing_struct.getLength())
+            
+            # Copy existing components
+            for i in range(existing_struct.getNumComponents()):
+                component = existing_struct.getComponent(i)
+                if component and not component.isUndefined():
+                    try:
+                        merged_struct.insertAtOffset(
+                            component.getOffset(),
+                            component.getDataType(),
+                            component.getLength(),
+                            component.getFieldName(),
+                            component.getComment()
+                        )
+                    except Exception as e:
+                        print(f"Warning: Could not copy existing field at offset {component.getOffset()}: {e}")
+            
+            # Add new fields that don't conflict
+            fields_added = 0
+            for field in new_fields:
+                field_name = field.get("name", "unknown_field")
+                field_type_str = field.get("type", "int")
+                field_offset = field.get("offset", 0)
+                
+                field_data_type = self.map_c_type_to_ghidra_type(field_type_str)
+                
+                # Check if this offset already has a field
+                existing_component = None
+                for i in range(merged_struct.getNumComponents()):
+                    comp = merged_struct.getComponent(i)
+                    if comp and comp.getOffset() == field_offset:
+                        existing_component = comp
+                        break
+                
+                if not existing_component:
+                    try:
+                        merged_struct.insertAtOffset(field_offset, field_data_type, 
+                                                   field_data_type.getLength(), field_name, None)
+                        fields_added += 1
+                    except Exception as e:
+                        print(f"Warning: Could not add new field '{field_name}' at offset {field_offset}: {e}")
+            
+            if fields_added > 0:
+                print(f"Merged {fields_added} new fields into existing struct '{existing_struct.getName()}'")
+            else:
+                print(f"No new fields added to existing struct '{existing_struct.getName()}'")
+            
+            # Resolve the merged struct
+            resolved_struct = self.data_type_manager.resolve(merged_struct, None)
+            return resolved_struct
+            
+        except Exception as e:
+            print(f"Error merging struct fields: {e}")
+            return existing_struct
+
     def create_struct_in_ghidra(self, struct_def: Dict) -> Optional[Structure]:
         if not self.data_type_manager:
             print("Error: No data type manager available")
@@ -817,6 +1006,28 @@ class StructGenerator:
         fields = struct_def.get("fields", [])
 
         try:
+            # Check if a similar struct already exists
+            existing_struct = self.find_existing_struct(struct_name)
+            
+            if existing_struct:
+                print(f"Found existing struct: {existing_struct.getName()}")
+                
+                # Check if the new struct is compatible with the existing one
+                if self.are_structs_compatible(existing_struct, fields):
+                    print(f"Structs are compatible, merging fields...")
+                    return self.merge_struct_fields(existing_struct, fields)
+                else:
+                    print(f"Structs are incompatible, creating new struct with modified name")
+                    # Create a new struct with a different name to avoid conflicts
+                    counter = 1
+                    while True:
+                        new_name = f"{struct_name}_variant{counter}"
+                        if not self.find_existing_struct(new_name):
+                            struct_name = new_name
+                            break
+                        counter += 1
+            
+            # Create new struct
             category_path = CategoryPath("/AI_Generated_Structs")
             struct_dt = StructureDataType(category_path, struct_name, 0)
 
@@ -860,11 +1071,23 @@ class StructGenerator:
             struct_name = mapping.get("struct_name", "")
             is_pointer = mapping.get("is_pointer", False)
 
-            if struct_name not in created_structs:
+            # First check created_structs, then fall back to global registry
+            struct_dt = None
+            if struct_name in created_structs:
+                struct_dt = created_structs[struct_name]
+            elif struct_name in self.global_struct_registry:
+                struct_dt = self.global_struct_registry[struct_name]
+            else:
+                # Try to find by partial name match (in case of conflict names)
+                for name, struct in self.global_struct_registry.items():
+                    if name.startswith(struct_name):
+                        struct_dt = struct
+                        print(f"Using struct variant '{name}' for original name '{struct_name}'")
+                        break
+
+            if not struct_dt:
                 print(f"Warning: Struct '{struct_name}' not found for variable '{var_name}'")
                 continue
-
-            struct_dt = created_structs[struct_name]
             
             if is_pointer:
                 var_data_type = PointerDataType(struct_dt)
@@ -883,7 +1106,7 @@ class StructGenerator:
                             HighFunctionDBUtil.ReturnCommitOption.COMMIT,
                             SourceType.USER_DEFINED,
                         )
-                        print(f"Applied struct '{struct_name}' to variable '{var_name}'")
+                        print(f"Applied struct '{struct_dt.getName()}' to variable '{var_name}'")
                     except Exception as e:
                         print(f"Error applying struct to variable '{var_name}': {e}")
                     break
@@ -912,9 +1135,23 @@ class StructGenerator:
         
         for struct_def in structs_data:
             struct_name = struct_def.get("name", "")
-            created_struct = self.create_struct_in_ghidra(struct_def)
-            if created_struct:
-                created_structs[struct_name] = created_struct
+            
+            # Check if we already have this struct in our global registry
+            if struct_name in self.global_struct_registry:
+                print(f"Reusing existing struct from registry: {struct_name}")
+                created_structs[struct_name] = self.global_struct_registry[struct_name]
+            else:
+                # Create the struct (this will handle conflicts and merging)
+                created_struct = self.create_struct_in_ghidra(struct_def)
+                if created_struct:
+                    # Store the actual name that was used (might be different due to conflicts)
+                    actual_name = created_struct.getName()
+                    created_structs[struct_name] = created_struct
+                    self.global_struct_registry[actual_name] = created_struct
+                    
+                    # Also register under the original name for easy lookup
+                    if actual_name != struct_name:
+                        self.global_struct_registry[struct_name] = created_struct
 
         variable_mappings = parsed_response.get("variable_mappings", [])
         if variable_mappings and created_structs:
