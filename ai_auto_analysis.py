@@ -1,22 +1,31 @@
+"""
+AI-Powered Ghidra Auto Analysis Script
+
+This script provides automated analysis capabilities for Ghidra using Azure OpenAI.
+It offers several key features for reverse engineering:
+
+1. Function Renaming: Automatically generates meaningful function names based on
+   decompiled code analysis
+2. Function Signature Generation: Creates proper C function signatures with 
+   parameter types and return types
+3. Variable Renaming & Retyping: Provides meaningful variable names and proper
+   data types within functions
+4. Function Commenting: Generates detailed documentation comments for functions
+5. Struct Generation: Automatically creates C structures based on memory access
+   patterns in the decompiled code
+
+The script uses Azure OpenAI's GPT-4 model to analyze decompiled code and generate
+human-readable names, types, and documentation.
+"""
+
 # @runtime PyGhidra
-"""
-Ghidra Script for AI-powered Function Analysis and Enhancement.
 
-This script provides automated function analysis capabilities for Ghidra,
-including:
-- Function renaming based on decompiled code analysis
-- Function commenting with detailed documentation
-- Function signature generation with proper parameter typing
-
-The script uses Azure OpenAI for natural language processing to analyze
-decompiled C code and generate meaningful function names, comments, and
-signatures.
-"""
-
-# Standard library imports
+# Standard library imports for JSON handling, OS operations, and collections
 import json
 import os
 from collections import defaultdict, deque
+
+# Type hints for better code documentation and IDE support
 from typing import (
     Any,
     Deque,
@@ -28,74 +37,165 @@ from typing import (
     Union,
 )
 
-# Third-party imports
+# HTTP client for Azure OpenAI API communication
 import httpx
+
+# LangChain components for AI model interaction
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import AzureChatOpenAI
 
-# Ghidra imports
+# Ghidra decompiler interface for code analysis
 from ghidra.app.decompiler import DecompInterface
+
+# Ghidra data type system imports for creating and managing C data types
 from ghidra.program.model.data import (
-    ArrayDataType,
-    BooleanDataType,
-    CharDataType,
-    DoubleDataType,
-    FloatDataType,
-    IntegerDataType,
-    LongDataType,
-    LongLongDataType,
-    PointerDataType,
-    ShortDataType,
-    UnsignedCharDataType,
-    UnsignedIntegerDataType,
-    UnsignedLongDataType,
-    UnsignedLongLongDataType,
-    UnsignedShortDataType,
-    VoidDataType,
+    ArrayDataType,        # For C array types
+    BooleanDataType,      # For boolean/bool types
+    CategoryPath,         # For organizing data types in categories
+    CharDataType,         # For signed char types
+    DataTypeManager,      # For managing program data types
+    DoubleDataType,       # For double-precision floating point
+    FloatDataType,        # For single-precision floating point
+    IntegerDataType,      # For signed integer types
+    LongDataType,         # For long integer types
+    LongLongDataType,     # For long long integer types
+    PointerDataType,      # For pointer types
+    ShortDataType,        # For short integer types
+    Structure,            # For C structure types
+    StructureDataType,    # For creating new structure types
+    UnsignedCharDataType, # For unsigned char types
+    UnsignedIntegerDataType,     # For unsigned int types
+    UnsignedLongDataType,        # For unsigned long types
+    UnsignedLongLongDataType,    # For unsigned long long types
+    UnsignedShortDataType,       # For unsigned short types
+    VoidDataType,                # For void type
 )
-from ghidra.program.model.listing import CodeUnit, ParameterImpl
+
+# Ghidra program model imports for function and variable manipulation
+from ghidra.program.model.listing import CodeUnit, ParameterImpl, Variable
+from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
 
-# Ghidra script global functions and variables
-# These are automatically available in Ghidra script environment
-import sys
-
-# Check if we're running in Ghidra by looking for Ghidra modules
-IN_GHIDRA = any('ghidra' in module for module in sys.modules.keys())
-
-if not IN_GHIDRA:
-    # We're not in Ghidra environment, provide fallbacks for development
-    def askString(title: str, message: str) -> str:
-        return "3"
-    
-    def askYesNo(title: str, message: str) -> bool:
-        return True
-    
-    def getCurrentProgram():
-        return None
-    
-    # Create a dummy monitor class for development
-    class DummyMonitor:
-        def checkCancelled(self):
-            pass
-    
-    monitor = DummyMonitor()
-else:
-    # In Ghidra, these will be available as globals
-    # We can't import them, they're injected by Ghidra
-    pass
-
+# Azure OpenAI configuration - stored in environment variables for security
 os.environ["AZURE_OPENAI_API_KEY"] = ""
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://aiml-aoai-api.gc1.myngc.com"
 
 
+def _map_c_type_to_ghidra_type(type_string: str):
+    """
+    Map C data type strings to corresponding Ghidra data types.
+    
+    This function converts string representations of C data types (as typically
+    generated by AI or found in source code) to the appropriate Ghidra DataType
+    objects. It handles standard C types, pointer types, array types, and common
+    variations/aliases.
+    
+    Args:
+        type_string (str): The C type string to convert (e.g., "int", "char*", "uint32_t")
+        
+    Returns:
+        DataType: The corresponding Ghidra DataType object. Returns IntegerDataType()
+                 as a fallback for unrecognized types.
+                 
+    Examples:
+        >>> _map_c_type_to_ghidra_type("int")
+        IntegerDataType()
+        >>> _map_c_type_to_ghidra_type("char*")
+        PointerDataType(CharDataType())
+        >>> _map_c_type_to_ghidra_type("uint32_t")
+        UnsignedIntegerDataType()
+    """
+    # Normalize the input string to lowercase and remove whitespace
+    normalized_type = type_string.lower().strip()
+
+    # Handle basic signed integer types
+    if normalized_type in ["int", "signed int"]:
+        return IntegerDataType()
+    elif normalized_type in ["unsigned int", "uint"]:
+        return UnsignedIntegerDataType()
+    elif normalized_type in ["short", "signed short"]:
+        return ShortDataType()
+    elif normalized_type in ["unsigned short", "ushort"]:
+        return UnsignedShortDataType()
+    elif normalized_type in ["long", "signed long"]:
+        return LongDataType()
+    elif normalized_type in ["unsigned long", "ulong"]:
+        return UnsignedLongDataType()
+        
+    # Handle character types
+    elif normalized_type in ["char", "signed char"]:
+        return CharDataType()
+    elif normalized_type in ["unsigned char", "uchar", "byte"]:
+        return UnsignedCharDataType()
+        
+    # Handle boolean and floating-point types
+    elif normalized_type in ["bool", "boolean"]:
+        return BooleanDataType()
+    elif normalized_type in ["float"]:
+        return FloatDataType()
+    elif normalized_type in ["double"]:
+        return DoubleDataType()
+    elif normalized_type == "void":
+        return VoidDataType()
+
+    # Handle pointer types (recursively process base type)
+    elif normalized_type.endswith("*"):
+        base_type = _map_c_type_to_ghidra_type(normalized_type[:-1].strip())
+        if base_type is not None:
+            return PointerDataType(base_type)
+        else:
+            return PointerDataType(VoidDataType())
+
+    # Handle fixed-width integer types (C99/C11 standard types)
+    elif normalized_type in ["int8", "int8_t", "signed char"]:
+        return CharDataType()
+    elif normalized_type in ["uint8", "uint8_t"]:
+        return UnsignedCharDataType()
+    elif normalized_type in ["int16", "int16_t", "short", "signed short"]:
+        return ShortDataType()
+    elif normalized_type in ["uint16", "uint16_t"]:
+        return UnsignedShortDataType()
+    elif normalized_type in ["int32", "int32_t", "int"]:
+        return IntegerDataType()
+    elif normalized_type in ["uint32", "uint32_t", "unsigned int"]:
+        return UnsignedIntegerDataType()
+    elif normalized_type in ["int64", "int64_t", "long long"]:
+        return LongLongDataType()
+    elif normalized_type in ["uint64", "uint64_t", "unsigned long long"]:
+        return UnsignedLongLongDataType()
+
+    # Handle common string types
+    elif normalized_type in ["char *", "string"]:
+        return PointerDataType(CharDataType())
+
+    # Handle array types (basic parsing)
+    elif "[" in normalized_type and "]" in normalized_type:
+        base_type_part, _, array_size_part = normalized_type.partition("[")
+        base_type = _map_c_type_to_ghidra_type(base_type_part.strip())
+        if base_type is not None and array_size_part[:-1].isdigit():
+            array_size = int(array_size_part[:-1])
+            return ArrayDataType(base_type, array_size, base_type.getLength())
+
+    # Default fallback for unrecognized types
+    return IntegerDataType()
+
+
 class AzureOpenAIClient:
     """
-    Azure OpenAI client for natural language processing.
+    Client for interacting with Azure OpenAI GPT models.
     
-    This class provides a simplified interface to Azure OpenAI for querying
-    large language models with custom system prompts and user queries.
+    This class provides a simplified interface for sending queries to Azure OpenAI
+    and receiving responses. It uses LangChain for pipeline management and handles
+    the complexity of setting up the Azure OpenAI connection, prompt templating,
+    and response parsing.
+    
+    The client is configured to use GPT-4o model and includes proper error handling
+    for API failures.
+    
+    Attributes:
+        system_prompt (str): The system prompt that defines the AI's role and behavior
+        chain: The LangChain processing pipeline for handling AI interactions
     """
     
     def __init__(self, system_prompt: str = "") -> None:
@@ -103,10 +203,11 @@ class AzureOpenAIClient:
         Initialize the Azure OpenAI client.
         
         Args:
-            system_prompt: The system prompt to use for all queries. Provides
-                context and instructions for the AI model.
+            system_prompt (str): The system prompt to use for all AI interactions.
+                               This defines the AI's role and expected behavior.
         """
         self.system_prompt: str = system_prompt
+        # Initialize the LangChain pipeline with the configured system prompt
         self.chain = self._get_langchain_pipeline()
 
     def query(self, user_query: str = "") -> Optional[str]:
@@ -114,14 +215,21 @@ class AzureOpenAIClient:
         Send a query to the AI model and return the response.
         
         Args:
-            user_query: The user's input query to send to the model.
+            user_query (str): The user's input/question to send to the AI model
             
         Returns:
-            The AI model's response as a string, or None if an error occurred.
+            Optional[str]: The AI's response as a string, or None if the query failed
+            
+        Example:
+            >>> client = AzureOpenAIClient("You are a helpful assistant")
+            >>> response = client.query("What is reverse engineering?")
+            >>> print(response)
         """
         try:
+            # Invoke the LangChain pipeline with the user's query
             return self.chain.invoke({"input": user_query})
         except Exception as error:
+            # Log the error and return None to indicate failure
             print(f"AI query failed: query='{user_query}', error={error}")
             return None
 
@@ -129,29 +237,36 @@ class AzureOpenAIClient:
         """
         Create and configure the LangChain processing pipeline.
         
+        This private method sets up the complete pipeline for AI interaction:
+        1. HTTP client with HTTP/2 support and SSL verification disabled
+        2. Azure OpenAI language model configuration
+        3. String output parser for clean text responses
+        4. Prompt template combining system and user messages
+        5. Complete processing chain linking all components
+        
         Returns:
-            A configured LangChain processing chain for AI queries.
+            LangChain processing chain configured for Azure OpenAI interaction
         """
-        # Create HTTP client with HTTP/2 support and disabled SSL verification
+        # Configure HTTP client for Azure OpenAI API
+        # HTTP/2 enabled for better performance, SSL verification disabled for dev environments
         http_client = httpx.Client(http2=True, verify=False)
 
-        # Initialize Azure OpenAI language model
+        # Initialize Azure OpenAI language model with GPT-4o deployment
         language_model = AzureChatOpenAI(
-            azure_deployment="gpt-4o",
+            azure_deployment="gpt-4o",  # Specific GPT-4 Omni model deployment
             http_client=http_client,
-            api_version="2024-02-01",
+            api_version="2024-02-01",   # Azure OpenAI API version
         )
 
-        # Configure string output parser
+        # String parser to extract clean text from model responses
         string_parser = StrOutputParser()
 
-        # Create chat prompt template with system and user messages
-        prompt_template = ChatPromptTemplate.from_messages([
-            ("system", self.system_prompt), 
-            ("user", "{input}")
-        ])
+        # Create prompt template with system and user message structure
+        prompt_template = ChatPromptTemplate.from_messages(
+            [("system", self.system_prompt), ("user", "{input}")]
+        )
 
-        # Build the processing chain: prompt -> model -> parser
+        # Chain all components together: prompt -> model -> parser
         processing_chain = prompt_template | language_model | string_parser
 
         return processing_chain
@@ -161,10 +276,29 @@ class FunctionRenamer:
     """
     AI-powered function renaming system for Ghidra.
     
-    This class analyzes decompiled function code using AI to generate
-    meaningful function names based on the function's behavior and purpose.
-    It handles function renaming workflows, including dependency tracking
-    and iterative updates.
+    This class automatically generates meaningful function names based on analysis
+    of decompiled code. It uses Azure OpenAI to understand function behavior and
+    suggest appropriate names that follow C naming conventions.
+    
+    The system includes safeguards against infinite renaming loops when functions
+    call each other and get renamed multiple times. It tracks rename iterations
+    and processes calling functions when a function name changes.
+    
+    Key Features:
+    - AI-powered name generation from decompiled code
+    - Loop prevention through rename iteration limits  
+    - Cascading updates to calling functions
+    - User-configurable iteration limits
+    - Comprehensive error handling
+    
+    Attributes:
+        current_program: The currently loaded Ghidra program
+        program_listing: Interface to the program's code listing
+        function_manager: Manager for function operations
+        decompiler_interface: Interface for decompiling functions
+        reference_manager: Manager for cross-references
+        ai_client: Azure OpenAI client for name generation
+        max_rename_iterations: Maximum times to rename a single function
     """
     
     def __init__(
@@ -175,32 +309,35 @@ class FunctionRenamer:
         decompiler_interface=None,
         reference_manager=None,
         max_rename_iterations: int = 3,
+        high_func_db_util=None,
     ) -> None:
         """
-        Initialize the function renamer.
+        Initialize the FunctionRenamer with Ghidra program components.
         
         Args:
-            current_program: The current Ghidra program instance.
-            program_listing: The program's listing for code access.
-            function_manager: Manager for function operations.
-            decompiler_interface: Interface for decompiling functions.
-            reference_manager: Manager for tracking function references.
-            max_rename_iterations: Maximum times to rename a function to
-                prevent infinite loops.
+            current_program: The active Ghidra program instance
+            program_listing: Program listing interface for code access
+            function_manager: Function manager for function operations
+            decompiler_interface: Decompiler for generating C code
+            reference_manager: Reference manager for cross-reference analysis
+            max_rename_iterations (int): Max times to rename a function (default: 3)
+            high_func_db_util: Utility for high-level function database operations
         """
+        # Store Ghidra program components
         self.current_program = current_program
         self.program_listing = program_listing
         self.function_manager = function_manager
         self.decompiler_interface = decompiler_interface
         self.reference_manager = reference_manager
-        
-        # Initialize AI client with function naming prompt
+
+        # Initialize AI client with function naming system prompt
         self.ai_client = AzureOpenAIClient(
             system_prompt=self._get_function_naming_prompt()
         )
-        
-        # Get max rename iterations from user if not provided
+
+        # Configure maximum rename iterations (user input if in Ghidra context)
         if current_program is not None:
+            # Interactive mode: ask user for max iterations
             self.max_rename_iterations = int(
                 askString(
                     "Max Number Of Times To Rename A Function (int)",
@@ -212,27 +349,36 @@ class FunctionRenamer:
                 )
             )
         else:
+            # Non-interactive mode: use provided default
             self.max_rename_iterations = max_rename_iterations
 
     def decompile_function(self, target_function) -> Optional[str]:
         """
-        Decompile a function and return its C code representation.
+        Decompile a function to C code for AI analysis.
+        
+        Uses Ghidra's decompiler to convert assembly code back to readable C code.
+        The decompiled code is what the AI analyzes to suggest meaningful names.
         
         Args:
-            target_function: The Ghidra function to decompile.
+            target_function: The Ghidra function object to decompile
             
         Returns:
-            The decompiled C code as a string, or None if decompilation
-            failed.
+            Optional[str]: The decompiled C code as a string, or None if decompilation failed
+            
+        Note:
+            Uses a 120-second timeout for decompilation to handle complex functions
         """
+        # Attempt to decompile the function with a 120-second timeout
         decompilation_result = self.decompiler_interface.decompileFunction(
-            target_function, 30, monitor
+            target_function, 120, monitor
         )
-        
-        if (decompilation_result and 
-            decompilation_result.decompileCompleted()):
+
+        # Check if decompilation was successful and completed
+        if decompilation_result and decompilation_result.decompileCompleted():
+            # Extract the C code from the decompilation result
             return decompilation_result.getDecompiledFunction().getC()
 
+        # Return None if decompilation failed
         return None
 
     def initialize_function_queue(self) -> Deque:
@@ -240,119 +386,166 @@ class FunctionRenamer:
         Create a queue of all functions in the program for processing.
         
         Returns:
-            A deque containing all functions in the program.
+            Deque: A double-ended queue containing all functions in the program
+                  in the order they should be processed
         """
+        # Get all functions from the function manager and create a processing queue
         return deque(self.function_manager.getFunctions(True))
 
-    def rename_single_function(
-        self, 
-        target_function, 
-        decompiled_code: str
-    ) -> None:
+    def rename_single_function(self, target_function, decompiled_code: str) -> None:
         """
-        Rename a single function using AI analysis.
+        Generate a new name for a single function using AI analysis.
+        
+        Sends the decompiled code to the AI model and attempts to apply the
+        suggested name to the function. Includes error handling for invalid
+        names or Ghidra API failures.
         
         Args:
-            target_function: The Ghidra function to rename.
-            decompiled_code: The decompiled C code of the function.
+            target_function: The Ghidra function object to rename
+            decompiled_code (str): The decompiled C code of the function
+            
+        Note:
+            Uses SourceType.USER_DEFINED to mark the rename as user-initiated,
+            which gives it higher priority in Ghidra's naming hierarchy
         """
-        new_function_name = self.ai_client.query(query=decompiled_code)
+        # Query AI model for a new function name based on decompiled code
+        new_function_name = self.ai_client.query(user_query=decompiled_code)
+
+        # Query AI model for a new function name based on decompiled code
+        new_function_name = self.ai_client.query(user_query=decompiled_code)
         
+        # If AI provided a valid name suggestion, attempt to apply it
         if new_function_name:
             try:
-                target_function.setName(
-                    new_function_name, 
-                    SourceType.USER_DEFINED
-                )
+                # Set the new function name with USER_DEFINED source type
+                target_function.setName(new_function_name, SourceType.USER_DEFINED)
             except Exception as error:
-                print(f"Failed to rename function to '{new_function_name}': "
-                      f"{error}")
+                # Log error if renaming fails (e.g., invalid name, duplicate name)
+                print(
+                    f"Failed to rename function to '{new_function_name}': " f"{error}"
+                )
 
     def process_all_functions(self) -> None:
         """
-        Process all functions in the program for renaming.
+        Process all functions in the program for AI-powered renaming.
         
-        This method implements an iterative renaming process that handles
-        function dependencies and prevents infinite loops through rename
-        count tracking.
+        This is the main processing loop that:
+        1. Initializes a queue with all functions
+        2. Processes each function for renaming
+        3. Tracks rename iterations to prevent infinite loops
+        4. Identifies and queues calling functions when names change
+        5. Continues until all functions are processed or iteration limits reached
+        
+        The algorithm ensures that when a function is renamed, all functions that
+        call it are re-analyzed since their decompiled code now contains a different
+        function name, which might affect their own suggested names.
         """
+        # Initialize processing queue with all functions in the program
         function_queue = self.initialize_function_queue()
+        
+        # Track functions that have been changed to avoid redundant processing
         changed_functions: Set = set()
+        
+        # Count rename iterations per function to prevent infinite loops
         rename_iteration_count: Dict = defaultdict(int)
 
+        # Main processing loop - continue until queue is empty
         while function_queue:
+            # Get the next function to process
             current_function = function_queue.popleft()
 
-            # Skip if maximum rename iterations reached
-            if (rename_iteration_count[current_function] >= 
-                self.max_rename_iterations):
+            # Skip functions that have reached the maximum rename limit
+            if rename_iteration_count[current_function] >= self.max_rename_iterations:
                 continue
 
-            # Decompile and analyze function
-            decompiled_code = self.decompile_function(
-                target_function=current_function
-            )
-            
+            # Attempt to decompile the function for AI analysis
+            decompiled_code = self.decompile_function(target_function=current_function)
+
+            # Only process if decompilation was successful
             if decompiled_code:
+                # Store original name to detect changes
                 original_name = current_function.getName()
-                
+
+                # Attempt to rename the function using AI analysis
                 self.rename_single_function(
-                    target_function=current_function, 
-                    decompiled_code=decompiled_code
+                    target_function=current_function, decompiled_code=decompiled_code
                 )
-                
+
+                # Get the (potentially new) function name after rename attempt
                 updated_name = current_function.getName()
 
-                # Track changes and update dependent functions
+                # If the name actually changed, handle cascade effects
                 if original_name != updated_name:
                     print(f"Renamed: {original_name} -> {updated_name}")
-                    changed_functions.add(current_function)
-                    rename_iteration_count[current_function] += 1
                     
-                    # Queue functions that call this renamed function
+                    # Mark this function as changed
+                    changed_functions.add(current_function)
+                    
+                    # Increment the rename counter for this function
+                    rename_iteration_count[current_function] += 1
+
+                    # Find all functions that call this renamed function
                     calling_functions = self._get_calling_functions(
-                        target_function=current_function, 
-                        changed_functions=changed_functions
+                        target_function=current_function,
+                        changed_functions=changed_functions,
                     )
+                    
+                    # Add calling functions back to the queue for re-analysis
+                    # This is necessary because their decompiled code now shows
+                    # a different function name, which might affect their naming
                     function_queue.extend(calling_functions)
-            
-    def _get_calling_functions(
-        self, 
-        target_function, 
-        changed_functions: Set
-    ) -> Set:
+
+    def _get_calling_functions(self, target_function, changed_functions: Set) -> Set:
         """
-        Find functions that call the target function.
+        Find all functions that call the specified target function.
+        
+        When a function is renamed, any function that calls it will have different
+        decompiled code (showing the new function name). These calling functions
+        should be re-analyzed to see if their own names should be updated based
+        on the new context.
         
         Args:
-            target_function: The function to find callers for.
-            changed_functions: Set of already changed functions to exclude.
-            
+            target_function: The function whose callers we want to find
+            changed_functions (Set): Functions already marked as changed to avoid
+                                   redundant processing
+                                   
         Returns:
-            Set of functions that call the target function.
+            Set: Set of functions that call the target function and haven't been
+                processed yet in this rename cycle
         """
         calling_functions: Set = set()
+        
+        # Get all references to this function's entry point
         function_references = self.reference_manager.getReferencesTo(
             target_function.getEntryPoint()
         )
-        
+
+        # Examine each reference to find calling functions
         for reference in function_references:
+            # Find the function that contains this reference (i.e., the caller)
             calling_function = self.function_manager.getFunctionContaining(
                 reference.getFromAddress()
             )
-            
-            if (calling_function and 
-                calling_function not in changed_functions):
+
+            # If we found a valid calling function that hasn't been processed yet
+            if calling_function and calling_function not in changed_functions:
                 calling_functions.add(calling_function)
 
         return calling_functions
 
     def _get_function_naming_prompt(self) -> str:
         """
-        Get the system prompt for AI-powered function naming.
+        Generate the system prompt for AI function naming.
+        
+        This prompt defines the AI's role as a reverse engineer and specifies
+        the requirements for generating function names. The prompt emphasizes:
+        - Meaningful names based on function behavior
+        - Valid C identifier syntax
+        - Proper naming conventions
+        - Avoiding generic names
         
         Returns:
-            A detailed prompt for generating meaningful function names.
+            str: The complete system prompt for function naming
         """
         return """
         You are a reverse engineer using Ghidra.
@@ -373,11 +566,32 @@ class FunctionRenamer:
 
 class FunctionCommenter:
     """
-    AI-powered function commenting system for Ghidra.
+    AI-powered function documentation generator for Ghidra.
     
-    This class generates detailed, structured comments for functions based
-    on their decompiled code. Comments include descriptions, functionality
-    explanations, and return value documentation.
+    This class automatically generates comprehensive documentation comments for
+    functions based on analysis of their decompiled code. It creates structured
+    comments in C docstring format that include:
+    - Function description
+    - Detailed functionality explanation  
+    - Return value documentation
+    
+    The generated comments are added as "plate comments" in Ghidra, which appear
+    at the top of functions and are visible in both the listing and decompiler views.
+    
+    Key Features:
+    - AI-powered comment generation from decompiled code
+    - Structured documentation format (DESCRIPTION, FUNCTIONALITY, RETURN)
+    - Integration with Ghidra's comment system
+    - Processing of functions sorted by complexity (smaller functions first)
+    - Comprehensive error handling and logging
+    
+    Attributes:
+        current_program: The currently loaded Ghidra program
+        program_listing: Interface to the program's code listing  
+        function_manager: Manager for function operations
+        decompiler_interface: Interface for decompiling functions
+        reference_manager: Manager for cross-references (unused but kept for consistency)
+        ai_client: Azure OpenAI client for comment generation
     """
     
     def __init__(
@@ -387,99 +601,123 @@ class FunctionCommenter:
         function_manager=None,
         decompiler_interface=None,
         reference_manager=None,
+        high_func_db_util=None,
     ) -> None:
         """
-        Initialize the function commenter.
+        Initialize the FunctionCommenter with Ghidra program components.
         
         Args:
-            current_program: The current Ghidra program instance.
-            program_listing: The program's listing for code access.
-            function_manager: Manager for function operations.
-            decompiler_interface: Interface for decompiling functions.
-            reference_manager: Manager for tracking function references.
+            current_program: The active Ghidra program instance
+            program_listing: Program listing interface for code access
+            function_manager: Function manager for function operations  
+            decompiler_interface: Decompiler for generating C code
+            reference_manager: Reference manager (kept for interface consistency)
+            high_func_db_util: High-level function utilities (unused but kept for consistency)
         """
+        # Store Ghidra program components
         self.current_program = current_program
         self.program_listing = program_listing
         self.function_manager = function_manager
         self.decompiler_interface = decompiler_interface
         self.reference_manager = reference_manager
 
-        # Initialize AI client with function commenting prompt
+        # Initialize AI client with function commenting system prompt
         self.ai_client = AzureOpenAIClient(
             system_prompt=self._get_function_commenting_prompt()
         )
 
     def add_comment_to_function(
-        self, 
-        target_function, 
-        decompiler_interface=None
+        self, target_function, decompiler_interface=None
     ) -> None:
         """
-        Add an AI-generated comment to a single function.
+        Generate and add an AI-created comment to a specific function.
+        
+        This method:
+        1. Decompiles the target function to C code
+        2. Sends the decompiled code to AI for analysis
+        3. Receives a structured comment from the AI
+        4. Adds the comment as a plate comment in Ghidra
         
         Args:
-            target_function: The Ghidra function to comment.
-            decompiler_interface: Optional decompiler interface (unused).
+            target_function: The Ghidra function object to comment
+            decompiler_interface: Optional decompiler interface (uses self.decompiler_interface if None)
+            
+        Note:
+            Uses CodeUnit.PLATE_COMMENT to add comments that appear at the top
+            of functions in both listing and decompiler views
         """
+        # Get function name for logging purposes
         function_name = target_function.getName()
         print(f"Generating comment for function: {function_name}")
-        
-        # Decompile the function
+
+        # Attempt to decompile the function with a 120-second timeout
         decompilation_result = self.decompiler_interface.decompileFunction(
-            target_function, 30, monitor
+            target_function, 120, monitor
         )
-        
-        if (decompilation_result and 
-            decompilation_result.decompileCompleted()):
-            # Get decompiled C code
-            decompiled_code = (decompilation_result
-                             .getDecompiledFunction()
-                             .getC())
-            
-            # Get code unit for the function entry point
+
+        # Check if decompilation was successful
+        if decompilation_result and decompilation_result.decompileCompleted():
+            # Extract the C code from decompilation result
+            decompiled_code = decompilation_result.getDecompiledFunction().getC()
+
+            # Get the code unit for this function (needed to add comments)
             function_code_unit = self.program_listing.getCodeUnitAt(
                 target_function.getEntryPoint()
             )
-            
+
             if function_code_unit:
-                # Generate AI comment
-                ai_generated_comment = self.ai_client.query(
-                    user_query=decompiled_code
-                )
-                
+                # Query AI for a structured comment based on decompiled code
+                ai_generated_comment = self.ai_client.query(user_query=decompiled_code)
+
                 if ai_generated_comment:
-                    # Add plate comment to function
+                    # Add the AI-generated comment as a plate comment
+                    # Plate comments appear at the top of functions
                     function_code_unit.setComment(
-                        CodeUnit.PLATE_COMMENT, 
-                        ai_generated_comment
+                        CodeUnit.PLATE_COMMENT, ai_generated_comment
                     )
                 else:
                     print(f"Failed to generate comment for {function_name}")
         else:
-            print(f"Decompilation of {function_name} failed or timed out, "
-                  f"skipping comment generation")
+            print(
+                f"Decompilation of {function_name} failed or timed out, "
+                f"skipping comment generation"
+            )
 
     def process_all_functions(self) -> None:
         """
-        Add comments to all functions in the program.
+        Process all functions in the program for AI-powered commenting.
         
-        Functions are processed in order of size (smallest first) to
-        optimize processing time and resource usage.
+        Functions are processed in order of complexity (smallest first) to:
+        1. Start with simpler functions that are easier to analyze
+        2. Build up context for more complex functions
+        3. Provide more consistent results
+        
+        The sorting is based on the number of addresses in each function's body,
+        which correlates with function complexity.
         """
-        # Get all functions and sort by size (number of addresses)
+        # Get all functions and sort by complexity (size)
         all_functions = list(self.function_manager.getFunctions(True))
+        # Sort by number of addresses (smaller/simpler functions first)
         all_functions.sort(key=lambda func: func.getBody().getNumAddresses())
-        
-        # Process each function
+
+        # Process each function for comment generation
         for function in all_functions:
             self.add_comment_to_function(target_function=function)
 
     def _get_function_commenting_prompt(self) -> str:
         """
-        Get the system prompt for AI-powered function commenting.
+        Generate the system prompt for AI function commenting.
+        
+        This prompt defines the AI's role and specifies the exact format for
+        function comments. The prompt includes:
+        - Role definition (reverse engineer using Ghidra)
+        - Comment format requirements (C docstring style)
+        - Specific sections to include (DESCRIPTION, FUNCTIONALITY, RETURN)
+        - Formatting guidelines (word wrap, indentation)
+        - Example format for consistency
         
         Returns:
-            A detailed prompt for generating structured function comments.
+            str: The complete system prompt for function commenting
         """
         return """
         You are a reverse engineer using Ghidra.
@@ -525,13 +763,37 @@ class FunctionCommenter:
         Provide only the comment with no extra information or commentary.
         """
 
-class FunctionSignatureGenerator:
+
+class VariableRenamer:
     """
-    AI-powered function signature generation system for Ghidra.
+    AI-powered variable renaming and retyping system for Ghidra.
     
-    This class analyzes decompiled function code to generate proper function
-    signatures with appropriate return types and parameter definitions. It
-    uses AI to determine meaningful parameter names and correct C data types.
+    This class automatically generates meaningful variable names and appropriate
+    data types based on analysis of decompiled function code. It examines how
+    variables are used within functions and suggests both better names and more
+    accurate C data types.
+    
+    The system works by:
+    1. Analyzing decompiled code to understand variable usage patterns
+    2. Using AI to suggest meaningful names and appropriate types
+    3. Updating Ghidra's high-level function database with new information
+    4. Committing changes to make them persistent
+    
+    Key Features:
+    - AI-powered variable name generation based on usage context
+    - Automatic data type inference and assignment
+    - Integration with Ghidra's high-level function representation
+    - JSON-based AI response parsing for structured data
+    - Comprehensive error handling for database updates
+    
+    Attributes:
+        current_program: The currently loaded Ghidra program
+        program_listing: Interface to the program's code listing
+        function_manager: Manager for function operations
+        decompiler_interface: Interface for decompiling functions
+        reference_manager: Manager for cross-references (unused but kept for consistency)
+        high_func_db_util: Utility for high-level function database operations
+        ai_client: Azure OpenAI client for variable analysis
     """
     
     def __init__(
@@ -541,65 +803,99 @@ class FunctionSignatureGenerator:
         function_manager=None,
         decompiler_interface=None,
         reference_manager=None,
+        high_func_db_util=None,
     ) -> None:
         """
-        Initialize the function signature generator.
+        Initialize the VariableRenamer with Ghidra program components.
         
         Args:
-            current_program: The current Ghidra program instance.
-            program_listing: The program's listing for code access.
-            function_manager: Manager for function operations.
-            decompiler_interface: Interface for decompiling functions.
-            reference_manager: Manager for tracking function references.
+            current_program: The active Ghidra program instance
+            program_listing: Program listing interface for code access
+            function_manager: Function manager for function operations
+            decompiler_interface: Decompiler for generating C code
+            reference_manager: Reference manager (kept for interface consistency)
+            high_func_db_util: High-level function database utilities for variable updates
         """
+        # Store Ghidra program components
         self.current_program = current_program
         self.program_listing = program_listing
         self.function_manager = function_manager
         self.decompiler_interface = decompiler_interface
         self.reference_manager = reference_manager
+        self.high_func_db_util = high_func_db_util
 
-        # Initialize AI client with signature generation prompt
+        # Initialize AI client with variable renaming system prompt
         self.ai_client = AzureOpenAIClient(
-            system_prompt=self._get_signature_generation_prompt()
+            system_prompt=self._get_variable_rename_prompt()
         )
 
     def decompile_function(self, target_function) -> Optional[str]:
         """
-        Decompile a function and return its C code representation.
+        Decompile a function to C code for variable analysis.
         
         Args:
-            target_function: The Ghidra function to decompile.
+            target_function: The Ghidra function object to decompile
             
         Returns:
-            The decompiled C code as a string, or None if decompilation
-            failed.
+            Optional[str]: The decompiled C code as a string, or None if decompilation failed
         """
+        # Attempt to decompile with 120-second timeout
         decompilation_result = self.decompiler_interface.decompileFunction(
-            target_function, 30, monitor
+            target_function, 120, monitor
         )
-        
-        if (decompilation_result and 
-            decompilation_result.decompileCompleted()):
+
+        # Return C code if decompilation successful, None otherwise
+        if decompilation_result and decompilation_result.decompileCompleted():
             return decompilation_result.getDecompiledFunction().getC()
 
         return None
-    
-    def parse_ai_signature_response(
-        self, 
-        ai_response: str = ""
-    ) -> Tuple[Optional[str], List[Tuple[str, str]]]:
+
+    def getHighFunc(self, function):
         """
-        Parse AI response for function signature information.
+        Get the high-level function representation from Ghidra.
+        
+        The high-level function representation provides access to variable symbols
+        and type information that can be modified and committed back to the database.
         
         Args:
-            ai_response: JSON response from AI containing signature data.
+            function: The Ghidra function object
             
         Returns:
-            A tuple containing (return_type, parameters_list) where
-            parameters_list is a list of (type, name) tuples.
+            HighFunction object if decompilation successful, None otherwise
+        """
+        # Decompile to get high-level representation
+        decompiled_result = self.decompiler_interface.decompileFunction(
+            function, 120, monitor
+        )
+        
+        if decompiled_result and decompiled_result.decompileCompleted():
+            return decompiled_result.getHighFunction()
+        return None
+
+    def parse_ai_signature_response(
+        self, ai_response: str = ""
+    ) -> Tuple[Optional[str], List[Tuple[str, str]]]:
+        """
+        Parse AI response for variable renaming information.
+        
+        The AI returns JSON data mapping old variable names to new names and types.
+        This method extracts and validates that data for use in Ghidra updates.
+        
+        Args:
+            ai_response (str): Raw AI response containing JSON data
+            
+        Returns:
+            Dict mapping old variable names to new name/type information,
+            or None if parsing failed
+            
+        Expected JSON format:
+        {
+            "old_var_name": {"type": "int", "name": "new_var_name"},
+            ...
+        }
         """
         try:
-            # Clean up response format
+            # Clean up response string (remove markdown code blocks if present)
             clean_response = ai_response.strip()
             if clean_response.startswith("```json"):
                 clean_response = clean_response[7:]
@@ -607,13 +903,259 @@ class FunctionSignatureGenerator:
                 clean_response = clean_response[:-3]
             clean_response = clean_response.strip()
 
-            # Parse JSON response
+            # Parse JSON data
+            mapping = json.loads(clean_response)
+
+        except (json.JSONDecodeError, KeyError, AttributeError):
+            # Return None if JSON parsing fails
+            mapping = None
+
+        return mapping
+
+    def rename_variables(self, target_function) -> None:
+        """
+        Rename and retype all variables in a function using AI analysis.
+        
+        This method:
+        1. Decompiles the function to get C code
+        2. Sends code to AI for variable analysis
+        3. Parses the AI response to get new names and types
+        4. Updates each variable in Ghidra's high-level function database
+        5. Commits changes to make them persistent
+        
+        Args:
+            target_function: The Ghidra function object to process
+        """
+        function_name = target_function.getName()
+
+        # Decompile function for AI analysis
+        decompiled_code = self.decompile_function(target_function=target_function)
+
+        if not decompiled_code:
+            print(f"Unable to rename/retype variables for {function_name}")
+            return
+
+        # Get AI suggestions for variable names and types
+        ai_response = self.ai_client.query(user_query=decompiled_code)
+        if not ai_response:
+            print(f"Unable to rename/retype variables for {function_name}")
+            return
+
+        # Get high-level function representation for variable access
+        high_func = self.getHighFunc(function=target_function)
+        local_symbols = high_func.getLocalSymbolMap().getSymbols()
+
+        # Parse AI response to get variable mapping data
+        mapping = self.parse_ai_signature_response(ai_response=ai_response)
+
+        # Process each variable in the function
+        for symbol in local_symbols:
+            try:
+                # Get current variable name
+                old_name = symbol.getName()
+            
+                # Look up new name and type from AI mapping
+                new_name = mapping.get(old_name, {}).get("name")
+                data_type_string = mapping.get(old_name, {}).get("type")
+
+                # Convert C type string to Ghidra data type
+                data_type = _map_c_type_to_ghidra_type(type_string=data_type_string)
+                
+                # Update variable in Ghidra database
+                self.high_func_db_util.updateDBVariable(
+                    symbol, new_name, data_type, SourceType.USER_DEFINED
+                )
+                
+                # Commit parameter changes to make them persistent
+                self.high_func_db_util.commitParamsToDatabase(
+                    high_func,
+                    True,
+                    HighFunctionDBUtil.ReturnCommitOption.COMMIT,
+                    SourceType.USER_DEFINED,
+                )
+
+                print(f"{target_function.getName()}.{symbol.getName()} -> {target_function.getName()}.{new_name}")
+            except Exception as e:
+                print(f"Unable to rename/retype {target_function.getName()}.{old_name}: {e}")
+
+
+    def process_all_functions(self) -> None:
+        """
+        Process all functions in the program for variable renaming and retyping.
+        
+        Functions are processed in order of complexity (smallest first) for
+        better AI analysis consistency and to establish context for complex functions.
+        """
+        # Get all functions and sort by complexity (size)
+        all_functions = list(self.function_manager.getFunctions(True))
+        # Sort by number of addresses (simpler functions first)
+        all_functions.sort(key=lambda func: func.getBody().getNumAddresses())
+
+        # Process each function for variable renaming
+        for function in all_functions:
+            self.rename_variables(target_function=function)
+
+    def _get_variable_rename_prompt(self) -> str:
+        """
+        Get the system prompt for AI-powered variable renaming.
+
+        This prompt defines the AI's role and specifies the expected JSON format
+        for variable renaming responses. It emphasizes meaningful names based on
+        usage context and proper C data type selection.
+
+        Returns:
+            A detailed prompt for generating variable renames and type assignments.
+        """
+        return """
+        You are a reverse engineer using Ghidra.
+        You will receive the decompiler output from Ghidra for a function.
+        You are to determine meaningful variable names for the variables in the function based on the decompiler's output.
+        You are to provide a map that links the old name to the new name.
+        
+        Requirements:
+        - Respond with JSON data only, no extra information or commentary
+        - Determine the data type for each variable using standard C types
+          (int, float, char*, uint32_t, etc.)
+        - Provide meaningful variable names based on function behavior
+        - Use only valid C identifier characters (letters, numbers, 
+          underscores)
+        - Avoid generic names like 'param1', 'arg', 'temp'
+        
+        Response format:
+        {{
+            "<old_name>": {{"type": "int", "name": "new_name>"}},
+            }} 
+        }}
+        
+        Provide meaningful variable names that reflect their purpose in
+        the function.
+        """
+
+
+class FunctionSignatureGenerator:
+    """
+    AI-powered function signature generation system for Ghidra.
+    
+    This class automatically generates proper C function signatures including:
+    - Return type determination based on function behavior
+    - Parameter type inference from usage patterns
+    - Meaningful parameter names based on context
+    
+    The system analyzes decompiled code to understand how parameters are used
+    and what values are returned, then creates complete function signatures
+    that replace Ghidra's default generic signatures.
+    
+    Key Features:
+    - AI-powered analysis of parameter usage and return behavior
+    - Automatic C type assignment for parameters and return values
+    - Integration with Ghidra's function signature system
+    - JSON-based structured response parsing
+    - Comprehensive error handling and validation
+    
+    Attributes:
+        current_program: The currently loaded Ghidra program
+        program_listing: Interface to the program's code listing
+        function_manager: Manager for function operations
+        decompiler_interface: Interface for decompiling functions
+        reference_manager: Manager for cross-references (unused but kept for consistency)
+        ai_client: Azure OpenAI client for signature generation
+    """
+    
+    def __init__(
+        self,
+        current_program=None,
+        program_listing=None,
+        function_manager=None,
+        decompiler_interface=None,
+        reference_manager=None,
+        high_func_db_util=None,
+    ) -> None:
+        """
+        Initialize the FunctionSignatureGenerator with Ghidra program components.
+        
+        Args:
+            current_program: The active Ghidra program instance
+            program_listing: Program listing interface for code access
+            function_manager: Function manager for function operations
+            decompiler_interface: Decompiler for generating C code
+            reference_manager: Reference manager (kept for interface consistency)
+            high_func_db_util: High-level function utilities (unused but kept for consistency)
+        """
+        # Store Ghidra program components
+        self.current_program = current_program
+        self.program_listing = program_listing
+        self.function_manager = function_manager
+        self.decompiler_interface = decompiler_interface
+        self.reference_manager = reference_manager
+
+        # Initialize AI client with signature generation system prompt
+        self.ai_client = AzureOpenAIClient(
+            system_prompt=self._get_signature_generation_prompt()
+        )
+
+    def decompile_function(self, target_function) -> Optional[str]:
+        """
+        Decompile a function to C code for signature analysis.
+        
+        Args:
+            target_function: The Ghidra function object to decompile
+            
+        Returns:
+            Optional[str]: The decompiled C code as a string, or None if decompilation failed
+        """
+        # Attempt decompilation with 120-second timeout
+        decompilation_result = self.decompiler_interface.decompileFunction(
+            target_function, 120, monitor
+        )
+
+        # Return C code if successful, None if failed
+        if decompilation_result and decompilation_result.decompileCompleted():
+            return decompilation_result.getDecompiledFunction().getC()
+
+        return None
+
+    def parse_ai_signature_response(
+        self, ai_response: str = ""
+    ) -> Tuple[Optional[str], List[Tuple[str, str]]]:
+        """
+        Parse AI response for function signature information.
+        
+        The AI returns JSON data containing return type and parameter information.
+        This method extracts and validates that data for use in Ghidra signature updates.
+        
+        Args:
+            ai_response (str): Raw AI response containing JSON signature data
+            
+        Returns:
+            Tuple containing:
+                - return_type (Optional[str]): The return type string, or None if parsing failed
+                - parameter_list (List[Tuple[str, str]]): List of (type, name) tuples for parameters
+                
+        Expected JSON format:
+        {
+            "return_type": "int",
+            "parameters": [
+                {"type": "char*", "name": "buffer"},
+                {"type": "int", "name": "size"}
+            ]
+        }
+        """
+        try:
+            # Clean up response string (remove markdown code blocks if present)
+            clean_response = ai_response.strip()
+            if clean_response.startswith("```json"):
+                clean_response = clean_response[7:]
+            if clean_response.endswith("```"):
+                clean_response = clean_response[:-3]
+            clean_response = clean_response.strip()
+
+            # Parse JSON data
             parsed_data = json.loads(clean_response)
 
             # Extract return type
             return_type = parsed_data.get("return_type")
-            
-            # Extract parameters
+
+            # Extract parameter list
             parameter_list = []
             for param_data in parsed_data.get("parameters", []):
                 param_type = param_data.get("type")
@@ -622,207 +1164,126 @@ class FunctionSignatureGenerator:
                     parameter_list.append((param_type, param_name))
 
         except (json.JSONDecodeError, KeyError, AttributeError):
+            # Return empty values if parsing fails
             return_type = None
             parameter_list = []
-        
+
         return return_type, parameter_list
 
     def apply_function_signature(self, target_function) -> None:
         """
-        Generate and apply a function signature to a Ghidra function.
+        Generate and apply a new function signature using AI analysis.
+        
+        This method:
+        1. Decompiles the function to get C code
+        2. Sends code to AI for signature analysis
+        3. Parses the AI response for return type and parameters
+        4. Converts C types to Ghidra data types
+        5. Updates the function signature in Ghidra
+        6. Replaces all existing parameters with new ones
         
         Args:
-            target_function: The Ghidra function to update with a new
-                signature.
+            target_function: The Ghidra function object to update
         """
         function_name = target_function.getName()
-        
-        # Decompile the function
-        decompiled_code = self.decompile_function(
-            target_function=target_function
-        )
-        
+
+        # Decompile function for AI analysis
+        decompiled_code = self.decompile_function(target_function=target_function)
+
         if not decompiled_code:
             print(f"Unable to sign {function_name}")
             return
-            
+
         # Get AI-generated signature
         ai_response = self.ai_client.query(user_query=decompiled_code)
         if not ai_response:
             print(f"Unable to sign {function_name}")
             return
-            
-        # Parse AI response
-        return_type_string, parameter_definitions = (
-            self.parse_ai_signature_response(ai_response=ai_response)
+
+        # Parse AI response to extract signature components
+        return_type_string, parameter_definitions = self.parse_ai_signature_response(
+            ai_response=ai_response
         )
 
         try:
-            # Validate parsed data
+            # Validate that we got usable signature data
             if not return_type_string or not parameter_definitions:
                 raise ValueError("Invalid signature data from AI")
 
             # Convert return type string to Ghidra data type
-            ghidra_return_type = self._map_c_type_to_ghidra_type(
+            ghidra_return_type = _map_c_type_to_ghidra_type(
                 type_string=return_type_string
             )
             if ghidra_return_type is None:
                 raise ValueError(f"Unknown return type: {return_type_string}")
 
-            # Set function return type
-            target_function.setReturnType(
-                ghidra_return_type, 
-                SourceType.USER_DEFINED
-            )
+            # Set the function's return type
+            target_function.setReturnType(ghidra_return_type, SourceType.USER_DEFINED)
 
-            # Prepare parameter data
+            # Prepare parameter data structures
             ghidra_data_types = []
             parameter_names = []
 
+            # Convert each parameter type string to Ghidra data type
             for param_type_string, param_name in parameter_definitions:
-                ghidra_param_type = self._map_c_type_to_ghidra_type(
+                ghidra_param_type = _map_c_type_to_ghidra_type(
                     type_string=param_type_string
                 )
 
                 if ghidra_param_type is None:
-                    raise ValueError(f"Unknown parameter type: "
-                                   f"{param_type_string}")
-                
+                    raise ValueError(f"Unknown parameter type: " f"{param_type_string}")
+
                 ghidra_data_types.append(ghidra_param_type)
                 parameter_names.append(param_name)
-            
-            # Clear existing parameters
+
+            # Remove all existing parameters (clean slate approach)
             while target_function.getParameterCount() > 0:
                 target_function.removeParameter(0)
 
-            # Add new parameters
-            for data_type, param_name in zip(ghidra_data_types, 
-                                           parameter_names):
-                parameter = ParameterImpl(
-                    param_name, 
-                    data_type, 
-                    self.current_program
-                )
-                target_function.addParameter(
-                    parameter, 
-                    SourceType.USER_DEFINED
-                )
+            # Add new parameters with proper types and names
+            for data_type, param_name in zip(ghidra_data_types, parameter_names):
+                # Create parameter implementation with type and name
+                parameter = ParameterImpl(param_name, data_type, self.current_program)
+                # Add parameter to function with USER_DEFINED source
+                target_function.addParameter(parameter, SourceType.USER_DEFINED)
 
-            print(f"Signed {function_name} with return type "
-                  f"{return_type_string} and {len(parameter_definitions)} "
-                  f"parameter(s)")
+            # Log successful signature application
+            print(
+                f"Signed {function_name} with return type "
+                f"{return_type_string} and {len(parameter_definitions)} "
+                f"parameter(s)"
+            )
 
         except (ValueError, Exception):
+            # Log failure but continue processing other functions
             print(f"Unable to sign {function_name}")
-    
+
     def process_all_functions(self) -> None:
         """
-        Generate signatures for all functions in the program.
+        Process all functions in the program for signature generation.
         
-        Functions are processed in order of size (smallest first) to
-        optimize processing time and resource usage.
+        Functions are processed in order of complexity (smallest first) to:
+        1. Establish context with simpler functions first
+        2. Provide more consistent analysis results
+        3. Allow complex functions to benefit from simpler function signatures
         """
-        # Get all functions and sort by size
+        # Get all functions and sort by complexity (size)
         all_functions = list(self.function_manager.getFunctions(True))
+        # Sort by number of addresses (simpler functions first)
         all_functions.sort(key=lambda func: func.getBody().getNumAddresses())
-        
-        # Process each function
+
+        # Process each function for signature generation
         for function in all_functions:
             self.apply_function_signature(target_function=function)
-
-    def _map_c_type_to_ghidra_type(self, type_string: str):
-        """
-        Map C type strings to corresponding Ghidra data types.
-        
-        Args:
-            type_string: A C type string (e.g., "int", "char*", "uint32_t").
-            
-        Returns:
-            The corresponding Ghidra DataType object, or None if not found.
-        """
-        # Normalize type string
-        normalized_type = type_string.lower().strip()
-
-        # Basic integer types
-        if normalized_type in ["int", "signed int"]:
-            return IntegerDataType()
-        elif normalized_type in ["unsigned int", "uint"]:
-            return UnsignedIntegerDataType()
-        elif normalized_type in ["short", "signed short"]:
-            return ShortDataType()
-        elif normalized_type in ["unsigned short", "ushort"]:
-            return UnsignedShortDataType()
-        elif normalized_type in ["long", "signed long"]:
-            return LongDataType()
-        elif normalized_type in ["unsigned long", "ulong"]:
-            return UnsignedLongDataType()
-        elif normalized_type in ["char", "signed char"]:
-            return CharDataType()
-        elif normalized_type in ["unsigned char", "uchar", "byte"]:
-            return UnsignedCharDataType()
-        elif normalized_type in ["bool", "boolean"]:
-            return BooleanDataType()
-        elif normalized_type in ["float"]:
-            return FloatDataType()
-        elif normalized_type in ["double"]:
-            return DoubleDataType()
-        elif normalized_type == "void":
-            return VoidDataType()
-        
-        # Pointer types
-        elif normalized_type.endswith("*"):
-            base_type = self._map_c_type_to_ghidra_type(
-                normalized_type[:-1].strip()
-            )
-            if base_type is not None:
-                return PointerDataType(base_type)
-            else:
-                return PointerDataType(VoidDataType())
-        
-        # Fixed-width integer types
-        elif normalized_type in ["int8", "int8_t", "signed char"]:
-            return CharDataType()
-        elif normalized_type in ["uint8", "uint8_t"]:
-            return UnsignedCharDataType()
-        elif normalized_type in ["int16", "int16_t", "short", "signed short"]:
-            return ShortDataType()
-        elif normalized_type in ["uint16", "uint16_t"]:
-            return UnsignedShortDataType()
-        elif normalized_type in ["int32", "int32_t", "int"]:
-            return IntegerDataType()
-        elif normalized_type in ["uint32", "uint32_t", "unsigned int"]:
-            return UnsignedIntegerDataType()
-        elif normalized_type in ["int64", "int64_t", "long long"]:
-            return LongLongDataType()
-        elif normalized_type in ["uint64", "uint64_t", "unsigned long long"]:
-            return UnsignedLongLongDataType()
-        
-        # String types
-        elif normalized_type in ["char *", "string"]:
-            return PointerDataType(CharDataType())
-        
-        # Array types
-        elif "[" in normalized_type and "]" in normalized_type:
-            base_type_part, _, array_size_part = normalized_type.partition("[")
-            base_type = self._map_c_type_to_ghidra_type(
-                base_type_part.strip()
-            )
-            if (base_type is not None and 
-                array_size_part[:-1].isdigit()):
-                array_size = int(array_size_part[:-1])
-                return ArrayDataType(
-                    base_type, 
-                    array_size, 
-                    base_type.getLength()
-                )
-
-        # Default fallback
-        return IntegerDataType()
 
     def _get_signature_generation_prompt(self) -> str:
         """
         Get the system prompt for AI-powered signature generation.
-        
+
+        This prompt defines the AI's role and specifies the expected JSON format
+        for function signature responses. It emphasizes proper C type selection
+        and meaningful parameter names.
+
         Returns:
             A detailed prompt for generating function signatures.
         """
@@ -844,57 +1305,740 @@ class FunctionSignatureGenerator:
         - Avoid generic names like 'param1', 'arg', 'temp'
         
         Response format:
-        {
+        {{
           "return_type": "int",
           "parameters": [
-            {"type": "int", "name": "device_id"},
-            {"type": "char*", "name": "buffer_ptr"},
-            {"type": "uint32_t", "name": "buffer_size"}
+            {{"type": "int", "name": "device_id"}},
+            {{"type": "char*", "name": "buffer_ptr"}},
+            {{"type": "uint32_t", "name": "buffer_size"}}
           ]
-        }
+        }}
         
         Provide meaningful parameter names that reflect their purpose in
         the function.
         """
+    
+class StructGenerator:
+    """
+    AI-powered C structure generation and analysis system for Ghidra.
+    
+    This class automatically identifies and creates C structures based on memory
+    access patterns in decompiled code. It analyzes how variables are used to
+    access memory at specific offsets and infers the underlying data structures.
+    
+    The system includes:
+    - Pattern recognition for structure field access
+    - AI-powered field naming and typing
+    - Conflict resolution for overlapping structures
+    - Integration with Ghidra's data type system
+    - Variable type updating with generated structures
+    
+    Key Features:
+    - AI analysis of memory access patterns to identify structures
+    - Automatic generation of C struct definitions
+    - Smart merging of compatible structures to avoid duplicates
+    - Application of generated structures to appropriate variables
+    - Global structure registry for reuse across functions
+    - Comprehensive error handling and validation
+    
+    Attributes:
+        current_program: The currently loaded Ghidra program
+        program_listing: Interface to the program's code listing
+        function_manager: Manager for function operations
+        decompiler_interface: Interface for decompiling functions
+        reference_manager: Manager for cross-references (unused but kept for consistency)
+        high_func_db_util: High-level function utilities for variable updates
+        data_type_manager: Manager for Ghidra's data type system
+        ai_client: Azure OpenAI client for structure analysis
+        global_struct_registry: Registry of all generated structures for reuse
+    """
+    
+    def __init__(
+        self,
+        current_program=None,
+        program_listing=None,
+        function_manager=None,
+        decompiler_interface=None,
+        reference_manager=None,
+        high_func_db_util=None,
+        data_type_manager=None,
+    ) -> None:
+        """
+        Initialize the StructGenerator with Ghidra program components.
+        
+        Args:
+            current_program: The active Ghidra program instance
+            program_listing: Program listing interface for code access
+            function_manager: Function manager for function operations
+            decompiler_interface: Decompiler for generating C code
+            reference_manager: Reference manager (kept for interface consistency)
+            high_func_db_util: High-level function utilities for variable updates
+            data_type_manager: Data type manager for creating and managing structures
+        """
+        # Store Ghidra program components
+        self.current_program = current_program
+        self.program_listing = program_listing
+        self.function_manager = function_manager
+        self.decompiler_interface = decompiler_interface
+        self.reference_manager = reference_manager
+        self.high_func_db_util = high_func_db_util
+        self.data_type_manager = data_type_manager
+
+        # Initialize AI client with structure generation system prompt
+        self.ai_client = AzureOpenAIClient(
+            system_prompt=self._get_struct_generator_prompt()
+        )
+        
+        # Initialize global registry for tracking generated structures
+        self.global_struct_registry = {}
+        self._initialize_struct_registry()
+
+    def _initialize_struct_registry(self):
+        """
+        Load existing AI-generated structures into the global registry.
+        
+        This method searches for previously created structures in the
+        "/AI_Generated_Structs" category and loads them into the registry
+        for reuse. This prevents duplicate structure creation and maintains
+        consistency across analysis sessions.
+        """
+        try:
+            # Look for existing AI-generated structures
+            category_path = CategoryPath("/AI_Generated_Structs")
+            category = self.data_type_manager.getCategory(category_path)
+            
+            if category:
+                # Load all existing structures into registry
+                for dt in category.getDataTypes():
+                    if isinstance(dt, Structure):
+                        self.global_struct_registry[dt.getName()] = dt
+                        print(f"Loaded existing struct into registry: {dt.getName()}")
+        except Exception as e:
+            print(f"Warning: Could not initialize struct registry: {e}")
+
+    def decompile_function(self, target_function) -> Optional[str]:
+        """
+        Decompile a function to C code for structure analysis.
+        
+        Args:
+            target_function: The Ghidra function object to decompile
+            
+        Returns:
+            Optional[str]: The decompiled C code as a string, or None if decompilation failed
+        """
+        # Attempt decompilation with 120-second timeout
+        decompilation_result = self.decompiler_interface.decompileFunction(
+            target_function, 120, monitor
+        )
+
+        # Return C code if successful, None if failed
+        if decompilation_result and decompilation_result.decompileCompleted():
+            return decompilation_result.getDecompiledFunction().getC()
+
+        return None
+
+    def getHighFunc(self, function):
+        """
+        Get the high-level function representation for variable manipulation.
+        
+        Args:
+            function: The Ghidra function object
+            
+        Returns:
+            HighFunction object if decompilation successful, None otherwise
+        """
+        # Decompile to get high-level representation
+        decompiled_result = self.decompiler_interface.decompileFunction(
+            function, 120, monitor
+        )
+        if decompiled_result and decompiled_result.decompileCompleted():
+            return decompiled_result.getHighFunction()
+        return None
+
+    def parse_ai_struct_response(
+        self, ai_response: str = ""
+    ) -> Dict:
+        """
+        Parse AI response for structure generation information.
+        
+        The AI returns JSON data containing structure definitions and variable
+        mappings. This method extracts and validates that data.
+        
+        Args:
+            ai_response (str): Raw AI response containing JSON structure data
+            
+        Returns:
+            Dict containing parsed structure and mapping data, or None if parsing failed
+            
+        Expected JSON format:
+        {
+            "structs": [
+                {
+                    "name": "DeviceConfig",
+                    "fields": [
+                        {"name": "device_id", "type": "uint32_t", "offset": 0},
+                        {"name": "status", "type": "uint16_t", "offset": 4}
+                    ]
+                }
+            ],
+            "variable_mappings": [
+                {"variable_name": "param_1", "struct_name": "DeviceConfig", "is_pointer": true}
+            ]
+        }
+        """
+        try:
+            # Clean up response string (remove markdown code blocks if present)
+            clean_response = ai_response.strip()
+            if clean_response.startswith("```json"):
+                clean_response = clean_response[7:]
+            if clean_response.endswith("```"):
+                clean_response = clean_response[:-3]
+            clean_response = clean_response.strip()
+            
+            # Parse JSON data
+            mapping = json.loads(clean_response)
+
+        except (json.JSONDecodeError, KeyError, AttributeError):
+            # Return None if parsing fails
+            mapping = None
+
+        return mapping
+    
+
+    def map_c_type_to_ghidra_type(self, type_string: str):
+        """
+        Map C data type strings to corresponding Ghidra data types.
+        
+        This is a local version of the global type mapping function that includes
+        additional error handling and logging specific to structure generation.
+        
+        Args:
+            type_string (str): The C type string to convert
+            
+        Returns:
+            DataType: The corresponding Ghidra DataType object
+        """
+        # Normalize the input string
+        normalized_type = type_string.lower().strip()
+
+        # Comprehensive type mapping dictionary for all common C types
+        type_mapping = {
+            "int": IntegerDataType(),
+            "signed int": IntegerDataType(),
+            "unsigned int": UnsignedIntegerDataType(),
+            "uint": UnsignedIntegerDataType(),
+            "short": ShortDataType(),
+            "signed short": ShortDataType(),
+            "unsigned short": UnsignedShortDataType(),
+            "ushort": UnsignedShortDataType(),
+            "long": LongDataType(),
+            "signed long": LongDataType(),
+            "unsigned long": UnsignedLongDataType(),
+            "ulong": UnsignedLongDataType(),
+            "char": CharDataType(),
+            "signed char": CharDataType(),
+            "unsigned char": UnsignedCharDataType(),
+            "uchar": UnsignedCharDataType(),
+            "byte": UnsignedCharDataType(),
+            "bool": BooleanDataType(),
+            "boolean": BooleanDataType(),
+            "float": FloatDataType(),
+            "double": DoubleDataType(),
+            "void": VoidDataType(),
+            "int8": CharDataType(),
+            "int8_t": CharDataType(),
+            "uint8": UnsignedCharDataType(),
+            "uint8_t": UnsignedCharDataType(),
+            "int16": ShortDataType(),
+            "int16_t": ShortDataType(),
+            "uint16": UnsignedShortDataType(),
+            "uint16_t": UnsignedShortDataType(),
+            "int32": IntegerDataType(),
+            "int32_t": IntegerDataType(),
+            "uint32": UnsignedIntegerDataType(),
+            "uint32_t": UnsignedIntegerDataType(),
+            "int64": LongLongDataType(),
+            "int64_t": LongLongDataType(),
+            "uint64": UnsignedLongLongDataType(),
+            "uint64_t": UnsignedLongLongDataType(),
+            "long long": LongLongDataType(),
+            "unsigned long long": UnsignedLongLongDataType(),
+        }
+
+        # Check direct mapping first
+        if normalized_type in type_mapping:
+            return type_mapping[normalized_type]
+
+        # Handle pointer types recursively
+        if normalized_type.endswith("*"):
+            base_type_str = normalized_type[:-1].strip()
+            base_type = self.map_c_type_to_ghidra_type(base_type_str)
+            return PointerDataType(base_type)
+
+        # Handle string types
+        if normalized_type in ["char *", "string"]:
+            return PointerDataType(CharDataType())
+
+        # Handle basic array types
+        if "[" in normalized_type and "]" in normalized_type:
+            base_type_part, _, array_size_part = normalized_type.partition("[")
+            base_type = self.map_c_type_to_ghidra_type(base_type_part.strip())
+            try:
+                array_size = int(array_size_part[:-1])
+                return ArrayDataType(base_type, array_size, base_type.getLength())
+            except (ValueError, AttributeError):
+                pass
+
+        # Log warning and return default for unknown types
+        print(f"Warning: Unknown type '{type_string}', defaulting to int")
+        return IntegerDataType()
+    
+    def find_existing_struct(self, struct_name: str) -> Optional[Structure]:
+        """
+        Search for an existing structure with the given name.
+        
+        This method searches both exact name matches and conflict-resolved names
+        (structures that Ghidra renamed due to conflicts) to find potentially
+        compatible existing structures.
+        
+        Args:
+            struct_name (str): The name of the structure to find
+            
+        Returns:
+            Optional[Structure]: The existing structure if found, None otherwise
+        """
+        # Define category path for AI-generated structures
+        category_path = CategoryPath("/AI_Generated_Structs")
+        
+        # First, try exact name match
+        existing_dt = self.data_type_manager.getDataType(category_path, struct_name)
+        if existing_dt and isinstance(existing_dt, Structure):
+            return existing_dt
+        
+        # If no exact match, search for conflict-resolved names
+        category = self.data_type_manager.getCategory(category_path)
+        if category:
+            for dt in category.getDataTypes():
+                if isinstance(dt, Structure):
+                    dt_name = dt.getName()
+                    # Look for names that start with our target and have conflict markers
+                    if dt_name.startswith(struct_name) and ('.conflict' in dt_name):
+                        return dt
+        
+        return None
+
+    def are_structs_compatible(self, existing_struct: Structure, new_fields: List[Dict]) -> bool:
+        """
+        Determine if an existing structure is compatible with new field definitions.
+        
+        This method analyzes whether two structures can be safely merged by checking:
+        1. Overlapping field offsets for type compatibility
+        2. Overall compatibility ratio
+        3. Conflict resolution strategies
+        
+        Args:
+            existing_struct (Structure): The existing Ghidra structure
+            new_fields (List[Dict]): List of new field definitions from AI
+            
+        Returns:
+            bool: True if structures are compatible and can be merged, False otherwise
+        """
+        if not existing_struct or not new_fields:
+            return False
+        
+        existing_fields = {}
+        for i in range(existing_struct.getNumComponents()):
+            component = existing_struct.getComponent(i)
+            if component and not component.isUndefined():
+                offset = component.getOffset()
+                existing_fields[offset] = {
+                    'name': component.getFieldName(),
+                    'type': component.getDataType(),
+                    'length': component.getLength()
+                }
+        
+        conflicts = 0
+        compatible_fields = 0
+        
+        for field in new_fields:
+            field_offset = field.get("offset", 0)
+            field_name = field.get("name", "unknown_field")
+            field_type_str = field.get("type", "int")
+            
+            if field_offset in existing_fields:
+                existing_field = existing_fields[field_offset]
+                new_field_type = self.map_c_type_to_ghidra_type(field_type_str)
+                
+                if self.are_types_compatible(existing_field['type'], new_field_type):
+                    compatible_fields += 1
+                    print(f"Compatible field at offset {field_offset}: {field_name}")
+                else:
+                    conflicts += 1
+                    print(f"Type conflict at offset {field_offset}: existing={existing_field['type']}, new={new_field_type}")
+            else:
+                compatible_fields += 1
+        
+        total_overlapping = conflicts + compatible_fields
+        if total_overlapping == 0:
+            return True
+        
+        compatibility_ratio = compatible_fields / total_overlapping
+        print(f"Struct compatibility: {compatible_fields}/{total_overlapping} fields compatible ({compatibility_ratio:.2%})")
+        
+        return compatibility_ratio >= 0.5
+
+    def are_types_compatible(self, type1, type2) -> bool:
+        if type1.equals(type2):
+            return True
+        
+        if hasattr(type1, 'getLength') and hasattr(type2, 'getLength'):
+            if type1.getLength() == type2.getLength():
+                return True
+        
+        if (isinstance(type1, PointerDataType) and isinstance(type2, PointerDataType)):
+            return True
+            
+        type1_name = type1.getName().lower() if hasattr(type1, 'getName') else str(type1).lower()
+        type2_name = type2.getName().lower() if hasattr(type2, 'getName') else str(type2).lower()
+        
+        integer_types = {'int', 'integer', 'signed int', 'int32', 'int32_t'}
+        unsigned_types = {'unsigned int', 'uint', 'uint32', 'uint32_t', 'unsigned'}
+        char_types = {'char', 'int8', 'int8_t', 'byte'}
+        uchar_types = {'unsigned char', 'uchar', 'uint8', 'uint8_t'}
+        short_types = {'short', 'int16', 'int16_t'}
+        ushort_types = {'unsigned short', 'ushort', 'uint16', 'uint16_t'}
+        
+        type_groups = [integer_types, unsigned_types, char_types, uchar_types, short_types, ushort_types]
+        
+        for group in type_groups:
+            if type1_name in group and type2_name in group:
+                return True
+        
+        return False
+
+    def merge_struct_fields(self, existing_struct: Structure, new_fields: List[Dict]) -> Structure:
+        try:
+            category_path = CategoryPath("/AI_Generated_Structs")
+            merged_struct = StructureDataType(category_path, existing_struct.getName(), existing_struct.getLength())
+            
+            for i in range(existing_struct.getNumComponents()):
+                component = existing_struct.getComponent(i)
+                if component and not component.isUndefined():
+                    try:
+                        merged_struct.insertAtOffset(
+                            component.getOffset(),
+                            component.getDataType(),
+                            component.getLength(),
+                            component.getFieldName(),
+                            component.getComment()
+                        )
+                    except Exception as e:
+                        print(f"Warning: Could not copy existing field at offset {component.getOffset()}: {e}")
+            
+            fields_added = 0
+            for field in new_fields:
+                field_name = field.get("name", "unknown_field")
+                field_type_str = field.get("type", "int")
+                field_offset = field.get("offset", 0)
+                
+                field_data_type = self.map_c_type_to_ghidra_type(field_type_str)
+                
+                existing_component = None
+                for i in range(merged_struct.getNumComponents()):
+                    comp = merged_struct.getComponent(i)
+                    if comp and comp.getOffset() == field_offset:
+                        existing_component = comp
+                        break
+                
+                if not existing_component:
+                    try:
+                        merged_struct.insertAtOffset(field_offset, field_data_type, 
+                                                   field_data_type.getLength(), field_name, None)
+                        fields_added += 1
+                    except Exception as e:
+                        print(f"Warning: Could not add new field '{field_name}' at offset {field_offset}: {e}")
+            
+            if fields_added > 0:
+                print(f"Merged {fields_added} new fields into existing struct '{existing_struct.getName()}'")
+            else:
+                print(f"No new fields added to existing struct '{existing_struct.getName()}'")
+            
+            resolved_struct = self.data_type_manager.resolve(merged_struct, None)
+            return resolved_struct
+            
+        except Exception as e:
+            print(f"Error merging struct fields: {e}")
+            return existing_struct
+
+    def create_struct_in_ghidra(self, struct_def: Dict) -> Optional[Structure]:
+        if not self.data_type_manager:
+            print("Error: No data type manager available")
+            return None
+
+        struct_name = struct_def.get("name", "UnknownStruct")
+        fields = struct_def.get("fields", [])
+
+        try:
+            existing_struct = self.find_existing_struct(struct_name)
+            
+            if existing_struct:
+                print(f"Found existing struct: {existing_struct.getName()}")
+                
+                if self.are_structs_compatible(existing_struct, fields):
+                    print(f"Structs are compatible, merging fields...")
+                    return self.merge_struct_fields(existing_struct, fields)
+                else:
+                    print(f"Structs are incompatible, creating new struct with modified name")
+                    counter = 1
+                    while True:
+                        new_name = f"{struct_name}_variant{counter}"
+                        if not self.find_existing_struct(new_name):
+                            struct_name = new_name
+                            break
+                        counter += 1
+            
+            category_path = CategoryPath("/AI_Generated_Structs")
+            struct_dt = StructureDataType(category_path, struct_name, 0)
+
+            for field in fields:
+                field_name = field.get("name", "unknown_field")
+                field_type_str = field.get("type", "int")
+                field_offset = field.get("offset", 0)
+
+                field_data_type = self.map_c_type_to_ghidra_type(field_type_str)
+
+                try:
+                    struct_dt.insertAtOffset(field_offset, field_data_type, 
+                                           field_data_type.getLength(), field_name, None)
+                except Exception as e:
+                    print(f"Warning: Could not add field '{field_name}' at offset {field_offset}: {e}")
+                    try:
+                        struct_dt.add(field_data_type, field_data_type.getLength(), 
+                                    field_name, None)
+                    except Exception as e2:
+                        print(f"Error: Could not add field '{field_name}' to struct: {e2}")
+
+            resolved_struct = self.data_type_manager.resolve(struct_dt, None)
+            print(f"Created struct: {struct_name} with {len(fields)} fields")
+            return resolved_struct
+
+        except Exception as e:
+            print(f"Error creating struct '{struct_name}': {e}")
+            return None
+    
+    def apply_struct_to_variables(self, target_function, struct_mappings: List[Dict], 
+                                created_structs: Dict[str, Structure]):
+        high_function = self.getHighFunc(target_function)
+        if not high_function:
+            print("Could not get high function for variable mapping")
+            return
+
+        local_symbols = high_function.getLocalSymbolMap().getSymbols()
+
+        for mapping in struct_mappings:
+            var_name = mapping.get("variable_name", "")
+            struct_name = mapping.get("struct_name", "")
+            is_pointer = mapping.get("is_pointer", False)
+
+            struct_dt = None
+            if struct_name in created_structs:
+                struct_dt = created_structs[struct_name]
+            elif struct_name in self.global_struct_registry:
+                struct_dt = self.global_struct_registry[struct_name]
+            else:
+                for name, struct in self.global_struct_registry.items():
+                    if name.startswith(struct_name):
+                        struct_dt = struct
+                        print(f"Using struct variant '{name}' for original name '{struct_name}'")
+                        break
+
+            if not struct_dt:
+                print(f"Warning: Struct '{struct_name}' not found for variable '{var_name}'")
+                continue
+            
+            if is_pointer:
+                var_data_type = PointerDataType(struct_dt)
+            else:
+                var_data_type = struct_dt
+
+            for symbol in local_symbols:
+                if symbol.getName() == var_name:
+                    try:
+                        self.high_func_db_util.updateDBVariable(
+                            symbol, var_name, var_data_type, SourceType.USER_DEFINED
+                        )
+                        self.high_func_db_util.commitParamsToDatabase(
+                            high_function,
+                            True,
+                            HighFunctionDBUtil.ReturnCommitOption.COMMIT,
+                            SourceType.USER_DEFINED,
+                        )
+                        print(f"Applied struct '{struct_dt.getName()}' to variable '{var_name}'")
+                    except Exception as e:
+                        print(f"Error applying struct to variable '{var_name}': {e}")
+                    break
+            else:
+                print(f"Warning: Variable '{var_name}' not found in function")
+
+
+    def generate_structs(self, target_function) -> None:
+        function_name = target_function.getName()
+
+        decompiled_code = self.decompile_function(target_function=target_function)
+
+        if not decompiled_code:
+            print(f"Unable to generate structs for {function_name}")
+            return
+
+        ai_response = self.ai_client.query(user_query=decompiled_code)
+        if not ai_response:
+            print(f"Unable to generate structs for {function_name}")
+            return
+        
+        try:
+
+            parsed_response = self.parse_ai_struct_response(ai_response=ai_response)
+
+            created_structs = {}
+            structs_data = parsed_response.get("structs", [])
+            
+            for struct_def in structs_data:
+                struct_name = struct_def.get("name", "")
+                
+                if struct_name in self.global_struct_registry:
+                    print(f"Reusing existing struct from registry: {struct_name}")
+                    created_structs[struct_name] = self.global_struct_registry[struct_name]
+                else:
+                    created_struct = self.create_struct_in_ghidra(struct_def)
+                    if created_struct:
+                        actual_name = created_struct.getName()
+                        created_structs[struct_name] = created_struct
+                        self.global_struct_registry[actual_name] = created_struct
+                        
+                        if actual_name != struct_name:
+                            self.global_struct_registry[struct_name] = created_struct
+
+            variable_mappings = parsed_response.get("variable_mappings", [])
+            if variable_mappings and created_structs:
+                self.apply_struct_to_variables(target_function, variable_mappings, created_structs)
+    
+        except Exception as e:
+            print(f"Unable to generate structs for {function_name}: {e}")
+
+    def process_all_functions(self) -> None:
+        all_functions = list(self.function_manager.getFunctions(True))
+        all_functions.sort(key=lambda func: func.getBody().getNumAddresses())
+
+        for function in all_functions:
+            self.generate_structs(target_function=function)
+
+    def _get_struct_generator_prompt(self) -> str:
+        return """
+        You are a reverse engineer using Ghidra.
+        You will receive the decompiler output from Ghidra for a function.
+        You are to determine what structs are present in the function.
+        You are to provide a map that defines the struct fields and their types.
+        You are also to provide a map between the struct and which variables need to typed with the new structs.
+
+        Requirements:
+        - Respond with JSON data only, no extra information or commentary
+        - Determine the data type for each variable using standard C types
+          (int, float, char*, uint32_t, etc.)
+        - Provide meaningful variable names based on function behavior
+        - Use only valid C identifier characters (letters, numbers, 
+          underscores)
+        - Avoid generic names like 'param1', 'arg', 'temp'
+        
+        Response format:
+        {{
+            "structs": [
+                {{
+                    "name": "DeviceConfig",
+                    "fields": [
+                        {{"name": "device_id", "type": "uint32_t", "offset": 0}},
+                        {{"name": "status_flags", "type": "uint16_t", "offset": 4}},
+                        {{"name": "buffer_ptr", "type": "char*", "offset": 8}},
+                        {{"name": "buffer_size", "type": "uint32_t", "offset": 12}}
+                    ]
+                }},
+                {{
+                    "name": "StatusInfo",
+                    "fields": [
+                        {{"name": "error_code", "type": "int", "offset": 0}},
+                        {{"name": "timestamp", "type": "uint64_t", "offset": 4}}
+                    ]
+                }}
+            ],
+            "variable_mappings": [
+                {{"variable_name": "param_1", "struct_name": "DeviceConfig", "is_pointer": true}},
+                {{"variable_name": "local_status", "struct_name": "StatusInfo", "is_pointer": false}}
+            ]
+        }}
+        
+        Provide meaningful names that reflect their purpose in the function.
+        Be sure sure to only generate full, valid json that can be parsed by python's json library.
+        """
+
 
 def main() -> None:
     """
-    Main execution function for the Ghidra function analysis script.
+    Main entry point for the AI-powered Ghidra analysis script.
     
-    This function orchestrates the AI-powered analysis workflow by:
-    1. Initializing Ghidra program interfaces
-    2. Getting user preferences for analysis types
-    3. Creating appropriate analyzer instances
-    4. Executing the selected analysis operations
+    This function orchestrates the entire AI analysis workflow by:
+    1. Setting up Ghidra program interfaces and components
+    2. Prompting the user for which analysis features to enable
+    3. Initializing the appropriate analysis modules based on user choices
+    4. Executing the selected analysis operations in the proper order
+    
+    The function runs in interactive mode, allowing users to selectively enable
+    different types of analysis. Each analysis type is independent and can be
+    run alone or in combination with others.
+    
+    Analysis Order:
+    1. Function Renaming - Generates meaningful function names
+    2. Function Signatures - Creates proper parameter and return types
+    3. Variable Renaming - Improves variable names and types within functions
+    4. Function Commenting - Adds comprehensive documentation
+    5. Struct Generation - Creates C structures from memory access patterns
+    
+    Note:
+        This function requires execution within the Ghidra environment as it
+        uses Ghidra-specific APIs and the askYesNo dialog function.
     """
-    # Initialize Ghidra program interfaces
+    # Get the current Ghidra program (must be loaded in Ghidra)
     current_program = getCurrentProgram()
-    
-    # Check if we're running in Ghidra environment
+
+    # Verify we're running within Ghidra with a loaded program
     if current_program is None:
         print("Error: This script must be run within Ghidra environment")
         return
+
+    # Initialize Ghidra program interfaces needed for analysis
     
+    # Program listing provides access to code units and comments
     program_listing = current_program.getListing()
+    
+    # Function manager handles all function-related operations
     function_manager = current_program.getFunctionManager()
 
-    # Initialize decompiler interface
+    # Initialize and configure the decompiler interface
     decompiler_interface = DecompInterface()
     decompiler_interface.openProgram(current_program)
 
-    # Initialize reference manager
+    # Reference manager provides cross-reference information
     reference_manager = current_program.getReferenceManager()
 
-    # Get user preferences for analysis operations
+    # High-level function database utilities for variable/parameter updates
+    high_func_db_util = HighFunctionDBUtil()
+
+    # Data type manager handles creation and management of data types
+    data_type_manager = current_program.getDataTypeManager()
+
+    # Interactive user prompts to select which analyses to perform
+    
     should_rename_functions: bool = askYesNo(
         "Rename Functions?",
         "Should functions be renamed based on the function's decompiled "
-        "output using AI analysis?",
-    )
-
-    should_comment_functions: bool = askYesNo(
-        "Comment Functions?",
-        "Should functions be commented based on the function's decompiled "
         "output using AI analysis?",
     )
 
@@ -904,49 +2048,120 @@ def main() -> None:
         "decompiled output using AI analysis?",
     )
 
-    # Initialize analysis classes based on user preferences
-    function_renamer: Optional[FunctionRenamer] = None
-    function_commenter: Optional[FunctionCommenter] = None
-    signature_generator: Optional[FunctionSignatureGenerator] = None
+    should_rename_variables: bool = askYesNo(
+        "Rename/retype Variables?",
+        "Should variables be renamed/retype based on the function's decompiled "
+        "output using AI analysis?",
+    )
 
+    should_comment_functions: bool = askYesNo(
+        "Comment Functions?",
+        "Should functions be commented based on the function's decompiled "
+        "output using AI analysis?",
+    )
+    
+    should_generate_structs: bool = askYesNo(
+        "Generate Structs?",
+        "Should structs be generated based on the function's decompiled "
+        "output using AI analysis?",
+    )
+
+    # Initialize analysis module variables (will be created only if needed)
+    function_renamer: Optional[FunctionRenamer] = None
+    signature_generator: Optional[FunctionSignatureGenerator] = None
+    variable_renamer = None
+    function_commenter: Optional[FunctionCommenter] = None
+
+    # Create analysis modules based on user selections
+    
     if should_rename_functions:
+        # Initialize function renamer with all required Ghidra components
         function_renamer = FunctionRenamer(
             current_program=current_program,
             program_listing=program_listing,
             function_manager=function_manager,
             decompiler_interface=decompiler_interface,
             reference_manager=reference_manager,
-        )
-
-    if should_comment_functions:
-        function_commenter = FunctionCommenter(
-            current_program=current_program,
-            program_listing=program_listing,
-            function_manager=function_manager,
-            decompiler_interface=decompiler_interface,
-            reference_manager=reference_manager,
+            high_func_db_util=high_func_db_util,
         )
 
     if should_generate_signatures:
+        # Initialize signature generator for creating function prototypes
         signature_generator = FunctionSignatureGenerator(
             current_program=current_program,
             program_listing=program_listing,
             function_manager=function_manager,
             decompiler_interface=decompiler_interface,
             reference_manager=reference_manager,
+            high_func_db_util=high_func_db_util,
         )
 
-    # Execute analysis operations in order
+    if should_rename_variables:
+        # Initialize variable renamer for improving local variable names and types
+        variable_renamer = VariableRenamer(
+            current_program=current_program,
+            program_listing=program_listing,
+            function_manager=function_manager,
+            decompiler_interface=decompiler_interface,
+            reference_manager=reference_manager,
+            high_func_db_util=high_func_db_util,
+        )
+
+    if should_comment_functions:
+        # Initialize function commenter for generating documentation
+        function_commenter = FunctionCommenter(
+            current_program=current_program,
+            program_listing=program_listing,
+            function_manager=function_manager,
+            decompiler_interface=decompiler_interface,
+            reference_manager=reference_manager,
+            high_func_db_util=high_func_db_util,
+        )
+
+    if should_generate_structs:
+        # Initialize struct generator for creating C structures
+        struct_generator = StructGenerator(
+            current_program=current_program,
+            program_listing=program_listing,
+            function_manager=function_manager,
+            decompiler_interface=decompiler_interface,
+            reference_manager=reference_manager,
+            high_func_db_util=high_func_db_util,
+            data_type_manager=data_type_manager,
+        )
+
+    # Execute selected analyses in optimal order
+    # Order matters: renaming should happen before signatures, 
+    # signatures before variables, variables before comments
+    
     if should_rename_functions and function_renamer:
+        print("Starting function renaming analysis...")
         function_renamer.process_all_functions()
 
-    if should_comment_functions and function_commenter:
-        function_commenter.process_all_functions()
-
     if should_generate_signatures and signature_generator:
+        print("Starting function signature generation...")
         signature_generator.process_all_functions()
 
+    if should_rename_variables and variable_renamer:
+        print("Starting variable renaming and retyping...")
+        variable_renamer.process_all_functions()
 
-# Entry point for script execution
+    if should_comment_functions and function_commenter:
+        print("Starting function documentation generation...")
+        function_commenter.process_all_functions()
+
+    if should_generate_structs and struct_generator:
+        print("Starting structure generation...")
+        struct_generator.process_all_functions()
+
+    print("AI analysis complete!")
+
+
 if __name__ == "__main__":
+    """
+    Entry point when script is executed directly.
+    
+    This ensures the main function runs when the script is executed in Ghidra,
+    either through the Script Manager or directly through the Ghidra API.
+    """
     main()
